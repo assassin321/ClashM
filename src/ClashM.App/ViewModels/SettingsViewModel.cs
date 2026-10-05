@@ -1,0 +1,1090 @@
+using System.Collections.ObjectModel;
+using CommunityToolkit.Mvvm.ComponentModel;
+using CommunityToolkit.Mvvm.Input;
+using ClashM.App.Services;
+using ClashM.Core.Services;
+
+namespace ClashM.App.ViewModels;
+
+public sealed partial class SettingsViewModel : ObservableObject
+{
+    private readonly ClashMHost _host;
+    private bool _loading;
+    private bool _applyingSwitch;
+
+    [ObservableProperty]
+    public partial bool AutoStartCore { get; set; }
+
+    [ObservableProperty]
+    public partial bool StartupWithWindows { get; set; }
+
+    [ObservableProperty]
+    public partial bool SystemProxyEnabled { get; set; }
+
+    [ObservableProperty]
+    public partial string SystemProxyMode { get; set; } = "manual";
+
+    [ObservableProperty]
+    public partial bool TunEnabled { get; set; }
+
+    [ObservableProperty]
+    public partial string Theme { get; set; } = "default";
+
+    [ObservableProperty]
+    public partial int NavigationStyle { get; set; }
+
+    /// <summary>背景材质：0=Mica，1=亚克力(Mica Alt)，2=纯色。</summary>
+    [ObservableProperty]
+    public partial int BackdropStyle { get; set; }
+
+    [ObservableProperty]
+    public partial string MixedPort { get; set; } = "7890";
+
+    [ObservableProperty]
+    public partial string ControllerPort { get; set; } = "9090";
+
+    [ObservableProperty]
+    public partial string Mode { get; set; } = "rule";
+
+    [ObservableProperty]
+    public partial string LogLevel { get; set; } = "info";
+
+    [ObservableProperty]
+    public partial bool AllowLan { get; set; }
+
+    [ObservableProperty]
+    public partial bool Ipv6 { get; set; } = true;
+
+    [ObservableProperty]
+    public partial string CorePath { get; set; } = "";
+
+    [ObservableProperty]
+    public partial string DataDirectory { get; set; } = "";
+
+    [ObservableProperty]
+    public partial string StatusText { get; set; } = "";
+
+    [ObservableProperty]
+    public partial string KernelVersion { get; set; } = "未知";
+
+    [ObservableProperty]
+    public partial string LatestKernelVersion { get; set; } = "—";
+
+    [ObservableProperty]
+    public partial bool KernelHasUpdate { get; set; }
+
+    [ObservableProperty]
+    public partial bool IsKernelBusy { get; set; }
+
+    [ObservableProperty]
+    public partial string KernelStatusText { get; set; } = "尚未检查";
+
+    [ObservableProperty]
+    public partial double KernelProgress { get; set; }
+
+    [ObservableProperty]
+    public partial bool KernelProgressVisible { get; set; }
+
+    [ObservableProperty]
+    public partial ObservableCollection<string> KernelVersions { get; set; } = new();
+
+    [ObservableProperty]
+    public partial string? SelectedKernelVersion { get; set; }
+
+    partial void OnKernelHasUpdateChanged(bool value) => OnPropertyChanged(nameof(UpdateButtonText));
+
+    [ObservableProperty]
+    public partial string ElevatedHostStatus { get; set; } = "未运行";
+
+    [ObservableProperty]
+    public partial bool AutoCheckAppUpdate { get; set; } = true;
+
+    [ObservableProperty]
+    public partial string AppVersion { get; set; } = "未知";
+
+    [ObservableProperty]
+    public partial string LatestAppVersion { get; set; } = "—";
+
+    [ObservableProperty]
+    public partial bool AppHasUpdate { get; set; }
+
+    [ObservableProperty]
+    public partial bool IsAppBusy { get; set; }
+
+    [ObservableProperty]
+    public partial string AppStatusText { get; set; } = "尚未检查";
+
+    [ObservableProperty]
+    public partial double AppProgress { get; set; }
+
+    [ObservableProperty]
+    public partial bool AppProgressVisible { get; set; }
+
+    partial void OnAppHasUpdateChanged(bool value) => OnPropertyChanged(nameof(UpdateAppButtonText));
+
+    public string UpdateAppButtonText => AppHasUpdate ? "一键更新" : "更新";
+
+    [ObservableProperty]
+    public partial bool SilentStart { get; set; }
+
+    [ObservableProperty]
+    public partial bool StartMinimized { get; set; }
+
+    [ObservableProperty]
+    public partial bool AutoQuitWithoutCore { get; set; }
+
+    [ObservableProperty]
+    public partial int AutoQuitWithoutCoreDelay { get; set; } = 30;
+
+    [ObservableProperty]
+    public partial bool AutoUpdateProfileOnStart { get; set; } = true;
+
+    [ObservableProperty]
+    public partial string DelayTestUrl { get; set; } = DelayTestSettings.DefaultUrl;
+
+    [ObservableProperty]
+    public partial string DelayTestTimeout { get; set; } = "3000";
+
+    [ObservableProperty]
+    public partial string DelayTestConcurrency { get; set; } = "16";
+
+    [ObservableProperty]
+    public partial string SubscriptionUserAgent { get; set; } = "";
+
+    [ObservableProperty]
+    public partial string SubscriptionTimeout { get; set; } = "60";
+
+    /// <summary>下载内核/geodata 时使用的代理端口（内核未运行时）；空表示不使用。</summary>
+    [ObservableProperty]
+    public partial string DownloadProxyPort { get; set; } = "";
+
+    [ObservableProperty]
+    public partial string HotkeyShowWindow { get; set; } = "";
+
+    [ObservableProperty]
+    public partial string HotkeyToggleSystemProxy { get; set; } = "";
+
+    [ObservableProperty]
+    public partial string HotkeyToggleTun { get; set; } = "";
+
+    [ObservableProperty]
+    public partial string HotkeyToggleMiniPanel { get; set; } = "";
+
+    [ObservableProperty]
+    public partial string HotkeyModeRule { get; set; } = "";
+
+    [ObservableProperty]
+    public partial string HotkeyModeGlobal { get; set; } = "";
+
+    [ObservableProperty]
+    public partial string HotkeyModeDirect { get; set; } = "";
+
+    /// <summary>
+    /// 尝试绑定快捷键，返回结果供页面决定是否提示冲突：
+    /// 与应用内其它动作冲突时返回冲突动作，且不做任何修改；被其它程序占用则返回失败。
+    /// </summary>
+    public async Task<HotkeyApplyResult> TryBindHotkeyAsync(string action, string text)
+    {
+        if (!Enum.TryParse<ClashM.App.Services.HotkeyAction>(action, out var hotkeyAction))
+            return new HotkeyApplyResult(HotkeyApplyStatus.Invalid, null);
+
+        var window = global::ClashM.App.App.Main;
+        if (window is null) return new HotkeyApplyResult(HotkeyApplyStatus.Invalid, null);
+
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            await window.Hotkeys.UnbindAsync(hotkeyAction);
+            await ReloadHotkeysAsync();
+            StatusText = "已清除快捷键";
+            return new HotkeyApplyResult(HotkeyApplyStatus.Cleared, null);
+        }
+
+        if (!ClashM.App.Services.HotkeyParser.TryParse(text, out _, out _))
+            return new HotkeyApplyResult(HotkeyApplyStatus.Invalid, null);
+
+        var normalized = text.Trim();
+        var conflict = await window.Hotkeys.FindConflictActionAsync(hotkeyAction, normalized);
+        if (conflict is not null)
+            return new HotkeyApplyResult(HotkeyApplyStatus.InternalConflict, conflict.Value);
+
+        var ok = await window.Hotkeys.SetAsync(hotkeyAction, normalized);
+        if (!ok) return new HotkeyApplyResult(HotkeyApplyStatus.Occupied, null);
+
+        await ReloadHotkeysAsync();
+        StatusText = $"快捷键已设为 {normalized}";
+        return new HotkeyApplyResult(HotkeyApplyStatus.Ok, null);
+    }
+
+    /// <summary>用户确认覆盖后：解除冲突动作的绑定，再把该快捷键绑到当前动作。</summary>
+    public async Task<bool> ResolveHotkeyConflictAsync(string action, string text, string conflictAction)
+    {
+        if (!Enum.TryParse<ClashM.App.Services.HotkeyAction>(action, out var target)) return false;
+        if (!Enum.TryParse<ClashM.App.Services.HotkeyAction>(conflictAction, out var conflict)) return false;
+        var window = global::ClashM.App.App.Main;
+        if (window is null) return false;
+
+        var normalized = text.Trim();
+        await window.Hotkeys.UnbindAsync(conflict);
+        var ok = await window.Hotkeys.SetAsync(target, normalized);
+        await ReloadHotkeysAsync();
+        StatusText = ok
+            ? $"已从「{ClashM.App.Services.HotkeyManager.DisplayName(conflict)}」移除并设为 {normalized}"
+            : "快捷键注册失败：可能已被其他程序占用";
+        return ok;
+    }
+
+    private async Task ReloadHotkeysAsync()
+    {
+        HotkeyShowWindow = await _host.Settings.GetAsync("hotkey.ShowWindow") ?? "";
+        HotkeyToggleSystemProxy = await _host.Settings.GetAsync("hotkey.ToggleSystemProxy") ?? "";
+        HotkeyToggleTun = await _host.Settings.GetAsync("hotkey.ToggleTun") ?? "";
+        HotkeyToggleMiniPanel = await _host.Settings.GetAsync("hotkey.ToggleMiniPanel") ?? "";
+        HotkeyModeRule = await _host.Settings.GetAsync("hotkey.ModeRule") ?? "";
+        HotkeyModeGlobal = await _host.Settings.GetAsync("hotkey.ModeGlobal") ?? "";
+        HotkeyModeDirect = await _host.Settings.GetAsync("hotkey.ModeDirect") ?? "";
+    }
+
+    /// <summary>动作的中文显示名（供冲突提示）。</summary>
+    public static string HotkeyDisplayName(ClashM.App.Services.HotkeyAction action)
+        => ClashM.App.Services.HotkeyManager.DisplayName(action);
+
+    [ObservableProperty]
+    public partial int GithubProxyIndex { get; set; }
+
+    [ObservableProperty]
+    public partial string GithubProxyCustom { get; set; } = "";
+
+    [ObservableProperty]
+    public partial bool AutoCloseConnection { get; set; } = true;
+
+    [ObservableProperty]
+    public partial string TunStack { get; set; } = "mixed";
+
+    [ObservableProperty]
+    public partial bool TunAutoRoute { get; set; } = true;
+
+    [ObservableProperty]
+    public partial bool TunAutoRedirect { get; set; }
+
+    [ObservableProperty]
+    public partial bool TunAutoDetectInterface { get; set; } = true;
+
+    [ObservableProperty]
+    public partial bool TunStrictRoute { get; set; }
+
+    [ObservableProperty]
+    public partial string TunMtu { get; set; } = "";
+
+    [ObservableProperty]
+    public partial string TunDnsHijack { get; set; } = "";
+
+    [ObservableProperty]
+    public partial string TunRouteExcludeAddress { get; set; } = "";
+
+    [ObservableProperty]
+    public partial string PauseSsids { get; set; } = "";
+
+    [ObservableProperty]
+    public partial string SsidProfileMap { get; set; } = "";
+
+    /// <summary>GitHub 代理内置选项，与 ComboBox 顺序一致。</summary>
+    public static readonly string[] GithubProxyBuiltins =
+    {
+        "auto", "direct",
+        "https://gh-proxy.org", "https://ghfast.top",
+        "https://down.clashparty.org", "https://download.mihomo.party",
+    };
+
+    public string UpdateButtonText => KernelHasUpdate ? "更新内核" : "重新下载";
+
+    public SettingsViewModel(ClashMHost host)
+    {
+        _host = host;
+        CorePath = host.Core.Paths.BinaryPath;
+        DataDirectory = global::ClashM.Data.ClashMAppData.ResolveDirectory();
+    }
+
+    public async Task LoadAsync()
+    {
+        _loading = true;
+        try
+        {
+            AutoStartCore = await _host.Settings.GetBoolAsync("core.autoStart", true);
+            Theme = await _host.Settings.GetAsync("theme") ?? "default";
+            NavigationStyle = await _host.Settings.GetIntAsync("ui.navigationStyle", 0);
+            BackdropStyle = await _host.Settings.GetIntAsync("ui.backdropStyle", 0);
+            MixedPort = (await _host.Settings.GetIntAsync("core.mixedPort", 7890)).ToString();
+            ControllerPort = (await _host.Settings.GetIntAsync("core.controllerPort", 9090)).ToString();
+            Mode = await _host.Settings.GetAsync("core.mode") ?? "rule";
+            LogLevel = await _host.Settings.GetAsync("core.logLevel") ?? "info";
+            AllowLan = await _host.Settings.GetBoolAsync("core.allowLan");
+            Ipv6 = await _host.Settings.GetBoolAsync("core.ipv6", true);
+            TunEnabled = await _host.Settings.GetBoolAsync("core.tun");
+            StartupWithWindows = _host.Startup.IsEnabled();
+            SystemProxyEnabled = _host.SystemProxy.IsEnabled();
+            SystemProxyMode = await _host.Settings.GetAsync("ui.systemProxyMode") ?? "manual";
+            KernelVersion = _host.KernelUpdate.GetInstalledVersion() ?? "未安装";
+            ElevatedHostStatus = _host.Elevated.IsElevatedHostRunning ? "运行中" : "未运行";
+
+            SilentStart = await _host.Settings.GetBoolAsync("ui.silentStart");
+            StartMinimized = await _host.Settings.GetBoolAsync("ui.startMinimized");
+            AutoQuitWithoutCore = await _host.Settings.GetBoolAsync("ui.autoQuitWithoutCore");
+            AutoQuitWithoutCoreDelay = await _host.Settings.GetIntAsync("ui.autoQuitWithoutCoreDelay", 30);
+            AutoUpdateProfileOnStart = await _host.Settings.GetBoolAsync("profile.autoUpdate", true);
+
+            AutoCheckAppUpdate = await _host.Settings.GetBoolAsync("ui.autoCheckAppUpdate", true);
+            AppVersion = global::ClashM.Core.Services.AppUpdateService.GetCurrentVersion() + (
+                _host.AppUpdate.IsInstalled ? "" : "（便携版）");
+            ApplyCachedAppUpdate();
+
+            var (dtUrl, dtTimeout, dtConc) = await DelayTestSettings.ReadAsync(_host.Settings);
+            DelayTestUrl = dtUrl;
+            DelayTestTimeout = dtTimeout.ToString();
+            DelayTestConcurrency = dtConc.ToString();
+
+            SubscriptionUserAgent = await _host.Settings.GetAsync("core.subscriptionUserAgent") ?? "";
+            SubscriptionTimeout = (await _host.Settings.GetIntAsync("core.subscriptionTimeout", 60)).ToString();
+
+            var dpp = await _host.Settings.GetIntAsync("core.downloadProxyPort", 0);
+            DownloadProxyPort = dpp > 0 ? dpp.ToString() : "";
+
+            HotkeyShowWindow = await _host.Settings.GetAsync("hotkey.ShowWindow") ?? "";
+            HotkeyToggleSystemProxy = await _host.Settings.GetAsync("hotkey.ToggleSystemProxy") ?? "";
+            HotkeyToggleTun = await _host.Settings.GetAsync("hotkey.ToggleTun") ?? "";
+            HotkeyToggleMiniPanel = await _host.Settings.GetAsync("hotkey.ToggleMiniPanel") ?? "";
+            HotkeyModeRule = await _host.Settings.GetAsync("hotkey.ModeRule") ?? "";
+            HotkeyModeGlobal = await _host.Settings.GetAsync("hotkey.ModeGlobal") ?? "";
+            HotkeyModeDirect = await _host.Settings.GetAsync("hotkey.ModeDirect") ?? "";
+
+            var githubProxy = await _host.Settings.GetAsync("core.githubProxy") ?? "auto";
+            var builtinIndex = Array.IndexOf(GithubProxyBuiltins, githubProxy);
+            GithubProxyIndex = builtinIndex >= 0 ? builtinIndex : GithubProxyBuiltins.Length;
+            GithubProxyCustom = builtinIndex >= 0 ? "" : githubProxy;
+
+            AutoCloseConnection = await _host.Settings.GetBoolAsync("core.autoCloseConnection", true);
+
+            TunStack = await _host.Settings.GetAsync("core.tunStack") ?? "mixed";
+            TunAutoRoute = await _host.Settings.GetBoolAsync("core.tunAutoRoute", true);
+            TunAutoRedirect = await _host.Settings.GetBoolAsync("core.tunAutoRedirect");
+            TunAutoDetectInterface = await _host.Settings.GetBoolAsync("core.tunAutoDetectInterface", true);
+            TunStrictRoute = await _host.Settings.GetBoolAsync("core.tunStrictRoute");
+            TunMtu = await _host.Settings.GetAsync("core.tunMtuText") ?? "";
+            TunDnsHijack = await _host.Settings.GetAsync("core.tunDnsHijack") ?? "";
+            TunRouteExcludeAddress = await _host.Settings.GetAsync("core.tunRouteExcludeAddress") ?? "";
+            PauseSsids = await _host.Settings.GetAsync("ui.pauseSsids") ?? "";
+            SsidProfileMap = await _host.Settings.GetAsync("ui.ssidProfileMap") ?? "";
+        }
+        finally
+        {
+            _loading = false;
+        }
+    }
+
+    partial void OnThemeChanged(string value)
+    {
+        if (_loading) return;
+        global::ClashM.App.App.ApplyTheme(value);
+        _ = PersistAsync("theme", value, "主题已切换");
+    }
+
+    partial void OnNavigationStyleChanged(int value)
+    {
+        if (_loading) return;
+        _ = _host.Settings.SetIntAsync("ui.navigationStyle", value);
+        global::ClashM.App.App.Main?.ApplyNavigationStyle(value);
+        StatusText = value == 1 ? "导航已切换为顶部" : "导航已切换为左侧";
+    }
+
+    partial void OnBackdropStyleChanged(int value)
+    {
+        if (_loading) return;
+        _ = _host.Settings.SetIntAsync("ui.backdropStyle", value);
+        global::ClashM.App.App.Main?.ApplyBackdropStyle(value);
+        StatusText = value switch
+        {
+            0 => "背景已切换为亚克力（透出下方窗口）",
+            1 => "背景已切换为 Mica",
+            2 => "背景已切换为纯色",
+            _ => "背景材质已更新",
+        };
+    }
+
+    partial void OnAutoStartCoreChanged(bool value)
+    {
+        if (_loading) return;
+        _ = _host.Settings.SetBoolAsync("core.autoStart", value);
+    }
+
+    partial void OnStartupWithWindowsChanged(bool value)
+    {
+        if (_loading) return;
+        _host.Startup.SetEnabled(value);
+        StatusText = value ? "已设为开机自启" : "已取消开机自启";
+    }
+
+    partial void OnSystemProxyEnabledChanged(bool value)
+    {
+        if (_loading || _applyingSwitch) return;
+        _ = ApplySystemProxyAsync(value);
+    }
+
+    partial void OnSystemProxyModeChanged(string value)
+    {
+        if (_loading) return;
+        var mode = string.Equals(value, "pac", StringComparison.OrdinalIgnoreCase) ? "pac" : "manual";
+        _ = _host.Settings.SetAsync("ui.systemProxyMode", mode);
+        StatusText = mode == "pac" ? "已切换为 PAC 模式，重新开关系统代理后生效" : "已切换为手动代理模式";
+    }
+
+    partial void OnTunEnabledChanged(bool value)
+    {
+        if (_loading || _applyingSwitch) return;
+        _ = ApplyTunAsync(value);
+    }
+
+    partial void OnAllowLanChanged(bool value)
+    {
+        if (_loading) return;
+        _ = _host.Settings.SetBoolAsync("core.allowLan", value);
+        StatusText = "已保存，重启内核后生效";
+    }
+
+    partial void OnIpv6Changed(bool value)
+    {
+        if (_loading) return;
+        _ = _host.Settings.SetBoolAsync("core.ipv6", value);
+        StatusText = "已保存，重启内核后生效";
+    }
+
+    partial void OnLogLevelChanged(string value)
+    {
+        if (_loading) return;
+        _ = ApplyLogLevelAsync(value);
+    }
+
+    partial void OnSilentStartChanged(bool value)
+    {
+        if (_loading) return;
+        _ = _host.Settings.SetBoolAsync("ui.silentStart", value);
+    }
+
+    partial void OnStartMinimizedChanged(bool value)
+    {
+        if (_loading) return;
+        _ = _host.Settings.SetBoolAsync("ui.startMinimized", value);
+    }
+
+    partial void OnAutoQuitWithoutCoreChanged(bool value)
+    {
+        if (_loading) return;
+        _ = _host.Settings.SetBoolAsync("ui.autoQuitWithoutCore", value);
+    }
+
+    partial void OnAutoQuitWithoutCoreDelayChanged(int value)
+    {
+        if (_loading) return;
+        if (value < 0) return;
+        _ = _host.Settings.SetIntAsync("ui.autoQuitWithoutCoreDelay", value);
+    }
+
+    partial void OnAutoUpdateProfileOnStartChanged(bool value)
+    {
+        if (_loading) return;
+        _ = _host.Settings.SetBoolAsync("profile.autoUpdate", value);
+    }
+
+    partial void OnDelayTestUrlChanged(string value)
+    {
+        if (_loading) return;
+        _ = _host.Settings.SetAsync("core.delayTestUrl", value ?? "");
+    }
+
+    partial void OnDelayTestTimeoutChanged(string value)
+    {
+        if (_loading) return;
+        if (int.TryParse(value, out var ms) && ms > 0)
+            _ = _host.Settings.SetIntAsync("core.delayTestTimeout", ms);
+    }
+
+    partial void OnDelayTestConcurrencyChanged(string value)
+    {
+        if (_loading) return;
+        if (int.TryParse(value, out var n) && n > 0)
+            _ = _host.Settings.SetIntAsync("core.delayTestConcurrency", n);
+    }
+
+    partial void OnSubscriptionUserAgentChanged(string value)
+    {
+        if (_loading) return;
+        _ = _host.Settings.SetAsync("core.subscriptionUserAgent", value ?? "");
+    }
+
+    partial void OnSubscriptionTimeoutChanged(string value)
+    {
+        if (_loading) return;
+        if (int.TryParse(value, out var s) && s > 0)
+            _ = _host.Settings.SetIntAsync("core.subscriptionTimeout", s);
+    }
+
+    partial void OnDownloadProxyPortChanged(string value)
+    {
+        if (_loading) return;
+        var port = int.TryParse(value, out var p) && p is > 0 and < 65536 ? p : 0;
+        _ = _host.Settings.SetIntAsync("core.downloadProxyPort", port);
+        ClashM.Core.Services.DownloadProxy.SetManualPort(port);
+        StatusText = port > 0 ? $"下载代理已设为 127.0.0.1:{port}" : "下载代理已关闭（用内核端口或直连）";
+    }
+
+    partial void OnGithubProxyIndexChanged(int value)
+    {
+        if (_loading) return;
+        PersistGithubProxy();
+    }
+
+    partial void OnGithubProxyCustomChanged(string value)
+    {
+        if (_loading) return;
+        if (GithubProxyIndex != GithubProxyBuiltins.Length) return;
+        PersistGithubProxy();
+    }
+
+    private void PersistGithubProxy()
+    {
+        var key = GithubProxyIndex >= 0 && GithubProxyIndex < GithubProxyBuiltins.Length
+            ? GithubProxyBuiltins[GithubProxyIndex]
+            : (string.IsNullOrWhiteSpace(GithubProxyCustom) ? "auto" : GithubProxyCustom.Trim());
+        _ = _host.Settings.SetAsync("core.githubProxy", key);
+    }
+
+    partial void OnAutoCloseConnectionChanged(bool value)
+    {
+        if (_loading) return;
+        _ = _host.Settings.SetBoolAsync("core.autoCloseConnection", value);
+    }
+
+    partial void OnTunStackChanged(string value)
+    {
+        if (_loading) return;
+        _ = _host.Settings.SetAsync("core.tunStack", value);
+        StatusText = "已保存，重启内核后生效";
+    }
+
+    partial void OnTunAutoRouteChanged(bool value) => PersistTunBool("core.tunAutoRoute", value);
+    partial void OnTunAutoRedirectChanged(bool value) => PersistTunBool("core.tunAutoRedirect", value);
+    partial void OnTunAutoDetectInterfaceChanged(bool value) => PersistTunBool("core.tunAutoDetectInterface", value);
+    partial void OnTunStrictRouteChanged(bool value) => PersistTunBool("core.tunStrictRoute", value);
+
+    private void PersistTunBool(string key, bool value)
+    {
+        if (_loading) return;
+        _ = _host.Settings.SetBoolAsync(key, value);
+        StatusText = "已保存，重启内核后生效";
+    }
+
+    partial void OnTunMtuChanged(string value)
+    {
+        if (_loading) return;
+        _ = _host.Settings.SetAsync("core.tunMtuText", value ?? "");
+        var mtu = int.TryParse(value, out var m) && m > 0 ? m : 0;
+        _ = _host.Settings.SetIntAsync("core.tunMtu", mtu);
+        StatusText = "已保存，重启内核后生效";
+    }
+
+    partial void OnTunDnsHijackChanged(string value)
+    {
+        if (_loading) return;
+        _ = _host.Settings.SetAsync("core.tunDnsHijack", value ?? "");
+        StatusText = "已保存，重启内核后生效";
+    }
+
+    partial void OnTunRouteExcludeAddressChanged(string value)
+    {
+        if (_loading) return;
+        _ = _host.Settings.SetAsync("core.tunRouteExcludeAddress", value ?? "");
+        StatusText = "已保存，重启内核后生效";
+    }
+
+    partial void OnPauseSsidsChanged(string value)
+    {
+        if (_loading) return;
+        _ = _host.Settings.SetAsync("ui.pauseSsids", value ?? "");
+        StatusText = "SSID 暂停规则已保存";
+    }
+
+    partial void OnSsidProfileMapChanged(string value)
+    {
+        if (_loading) return;
+        _ = _host.Settings.SetAsync("ui.ssidProfileMap", value ?? "");
+        StatusText = "SSID 订阅切换规则已保存";
+    }
+
+    partial void OnMixedPortChanged(string value)
+    {
+        if (_loading) return;
+        if (int.TryParse(value, out var mp) && mp is > 0 and < 65536)
+        {
+            _ = _host.Settings.SetIntAsync("core.mixedPort", mp);
+            StatusText = "端口已保存，重启内核后生效";
+        }
+    }
+
+    partial void OnControllerPortChanged(string value)
+    {
+        if (_loading) return;
+        if (int.TryParse(value, out var cp) && cp is > 0 and < 65536)
+        {
+            _ = _host.Settings.SetIntAsync("core.controllerPort", cp);
+            StatusText = "端口已保存，重启内核后生效";
+        }
+    }
+
+    private async Task PersistAsync(string key, string value, string message)
+    {
+        try
+        {
+            await _host.Settings.SetAsync(key, value);
+            StatusText = message;
+        }
+        catch (Exception ex)
+        {
+            StatusText = $"保存失败：{ex.Message}";
+        }
+    }
+
+    private async Task ApplySystemProxyAsync(bool enabled)
+    {
+        // 统一走 ModeSelector：广播同步到主/迷你面板，并支持快速连续操作收敛。
+        var selector = global::ClashM.App.App.Main?.ModeSelector;
+        if (selector is not null)
+        {
+            await selector.SetSystemProxyAsync(enabled);
+            // 不能读 selector.SystemProxyOn：它是经 DispatcherQueue 异步回写的，
+            // 此处可能仍是旧值，会把刚切换的状态覆盖回去。直接读注册表真实状态。
+            _applyingSwitch = true;
+            try
+            {
+                var on = _host.SystemProxy.IsEnabled();
+                SystemProxyEnabled = on;
+                StatusText = on ? "系统代理已开启" : "系统代理已关闭";
+            }
+            finally
+            {
+                _applyingSwitch = false;
+            }
+            return;
+        }
+
+        try
+        {
+            if (enabled)
+            {
+                var port = await _host.Settings.GetIntAsync("core.mixedPort", 7890);
+                _host.SystemProxy.Enable($"127.0.0.1:{port}", "localhost;127.*;10.*;172.16.*;192.168.*");
+                StatusText = $"系统代理已开启（127.0.0.1:{port}）";
+            }
+            else
+            {
+                _host.SystemProxy.Disable();
+                StatusText = "系统代理已关闭";
+            }
+        }
+        catch (Exception ex)
+        {
+            StatusText = $"系统代理设置失败：{ex.Message}";
+        }
+
+        AppSignals.RaiseSwitchesChanged();
+    }
+
+    private async Task ApplyTunAsync(bool enabled)
+    {
+        // 统一走 ModeSelector：热切换 TUN 不重启内核、不动系统代理，并广播同步到各面板。
+        var selector = global::ClashM.App.App.Main?.ModeSelector;
+        if (selector is not null)
+        {
+            await selector.SetTunAsync(enabled);
+            // 同系统代理：selector.TunOn 异步回写，此处读真实设置值。
+            _applyingSwitch = true;
+            try
+            {
+                var on = await _host.Settings.GetBoolAsync("core.tun");
+                TunEnabled = on;
+                StatusText = on ? "TUN 已开启" : "TUN 已关闭";
+            }
+            finally
+            {
+                _applyingSwitch = false;
+            }
+            return;
+        }
+
+        try
+        {
+            await _host.Settings.SetBoolAsync("core.tun", enabled);
+            if (enabled)
+            {
+                try
+                {
+                    await _host.KernelUpdate.EnsureWintunAsync();
+                }
+                catch
+                {
+                }
+            }
+
+            // 必须先重新生成 runtime.yaml，否则 tun 段不会写入。
+            await _host.ApplyActiveProfileAsync();
+
+            if (_host.Core.State is CoreState.Running or CoreState.Error)
+            {
+                StatusText = enabled ? "正在以 TUN 模式重启内核…" : "正在重启内核…";
+                await _host.Core.RestartAsync();
+                StatusText = _host.Core.State == CoreState.Running ? "TUN 设置已生效" : "内核重启失败";
+            }
+            else
+            {
+                StatusText = "已保存，重启内核后生效";
+            }
+        }
+        catch (Exception ex)
+        {
+            StatusText = $"TUN 设置失败：{ex.Message}";
+        }
+
+        AppSignals.RaiseSwitchesChanged();
+    }
+
+    private async Task ApplyLogLevelAsync(string value)
+    {
+        await _host.Settings.SetAsync("core.logLevel", value);
+        if (_host.Core.Api is not null && _host.Core.State == CoreState.Running)
+        {
+            try
+            {
+                await _host.Core.Api.PatchConfigsAsync(new Dictionary<string, object>
+                {
+                    ["log-level"] = value,
+                });
+                StatusText = "日志级别已生效";
+                return;
+            }
+            catch
+            {
+            }
+        }
+        StatusText = "已保存，重启内核后生效";
+    }
+
+    [RelayCommand]
+    private async Task FlushCachesAsync()
+    {
+        if (_host.Core.Api is null)
+        {
+            StatusText = "内核未运行";
+            return;
+        }
+        try
+        {
+            await _host.Core.Api.FlushDnsAsync();
+            await _host.Core.Api.FlushFakeIpAsync();
+            StatusText = "DNS 与 FakeIP 缓存已清除";
+        }
+        catch (Exception ex)
+        {
+            StatusText = $"清除失败：{ex.Message}";
+        }
+    }
+
+    [RelayCommand]
+    private async Task RestartCoreAsync()
+    {
+        StatusText = "正在重启内核…";
+        await _host.Core.RestartAsync();
+        StatusText = _host.Core.State == CoreState.Running ? "内核已重启" : "内核重启失败";
+    }
+
+    [RelayCommand]
+    private void OpenDataDirectory()
+    {
+        try
+        {
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = DataDirectory,
+                UseShellExecute = true,
+            });
+        }
+        catch
+        {
+        }
+    }
+
+    [RelayCommand]
+    private async Task CheckKernelAsync()
+    {
+        IsKernelBusy = true;
+        KernelStatusText = "正在检查更新…";
+        try
+        {
+            var info = await _host.KernelUpdate.CheckAsync();
+            KernelVersion = info.CurrentVersion ?? "未安装";
+            LatestKernelVersion = info.LatestVersion ?? "—";
+            KernelHasUpdate = info.HasUpdate;
+            KernelStatusText = info.Error is not null
+                ? $"检查失败：{info.Error}"
+                : info.HasUpdate ? "发现新版本" : "已是最新";
+        }
+        catch (Exception ex)
+        {
+            KernelStatusText = $"检查失败：{ex.Message}";
+        }
+        finally
+        {
+            IsKernelBusy = false;
+        }
+    }
+
+    [RelayCommand]
+    private async Task UpdateKernelAsync()
+    {
+        IsKernelBusy = true;
+        KernelProgressVisible = true;
+        KernelProgress = 0;
+        KernelStatusText = "正在下载内核…";
+
+        var wasRunning = _host.Core.State == CoreState.Running;
+        if (wasRunning) await _host.Core.StopAsync();
+
+        try
+        {
+            var target = LatestKernelVersion;
+            if (string.IsNullOrEmpty(target) || target == "—")
+            {
+                var info = await _host.KernelUpdate.CheckAsync();
+                target = info.LatestVersion;
+            }
+            if (string.IsNullOrEmpty(target))
+            {
+                KernelStatusText = "无法确定目标版本";
+                return;
+            }
+
+            var progress = new Progress<double>(p =>
+            {
+                KernelProgress = p * 100;
+                KernelStatusText = $"正在下载内核… {p * 100:0}%";
+            });
+
+            var ok = await _host.KernelUpdate.DownloadAndInstallAsync(target, progress);
+            if (ok)
+            {
+                KernelVersion = _host.KernelUpdate.GetInstalledVersion() ?? target;
+                KernelHasUpdate = false;
+                KernelStatusText = $"内核已更新到 {target}，正在准备地理数据…";
+
+                var geodataProgress = new Progress<double>(p =>
+                    KernelStatusText = $"正在下载地理数据… {p * 100:0}%");
+                await _host.KernelUpdate.EnsureGeodataAsync(geodataProgress);
+
+                if (await _host.Settings.GetBoolAsync("core.tun"))
+                    await _host.KernelUpdate.EnsureWintunAsync();
+
+                KernelStatusText = $"内核已更新到 {target}";
+            }
+            else
+            {
+                KernelStatusText = "内核更新失败";
+            }
+        }
+        catch (Exception ex)
+        {
+            KernelStatusText = $"更新失败：{ex.Message}";
+        }
+        finally
+        {
+            KernelProgressVisible = false;
+            IsKernelBusy = false;
+            if (wasRunning) await _host.Core.StartAsync();
+        }
+    }
+
+    [RelayCommand]
+    private async Task LoadKernelVersionsAsync()
+    {
+        if (KernelVersions.Count > 0) return;
+        try
+        {
+            var versions = await _host.KernelUpdate.ListVersionsAsync();
+            KernelVersions.Clear();
+            foreach (var v in versions) KernelVersions.Add(v);
+            if (KernelVersions.Count > 0)
+                SelectedKernelVersion = string.Equals(KernelVersions[0], LatestKernelVersion, StringComparison.OrdinalIgnoreCase)
+                    ? KernelVersions[0]
+                    : KernelVersions[0];
+        }
+        catch
+        {
+        }
+    }
+
+    [RelayCommand]
+    private async Task UpgradeToSelectedAsync()
+    {
+        var target = SelectedKernelVersion;
+        if (string.IsNullOrEmpty(target)) return;
+
+        IsKernelBusy = true;
+        KernelProgressVisible = true;
+        KernelProgress = 0;
+        KernelStatusText = $"正在下载内核 {target}…";
+
+        var wasRunning = _host.Core.State == CoreState.Running;
+        if (wasRunning) await _host.Core.StopAsync();
+
+        try
+        {
+            var progress = new Progress<double>(p =>
+            {
+                KernelProgress = p * 100;
+                KernelStatusText = $"正在下载内核… {p * 100:0}%";
+            });
+
+            var ok = await _host.KernelUpdate.DownloadAndInstallAsync(target, progress);
+            if (ok)
+            {
+                KernelVersion = _host.KernelUpdate.GetInstalledVersion() ?? target;
+                LatestKernelVersion = target;
+                KernelHasUpdate = false;
+                KernelStatusText = $"内核已更新到 {target}，正在准备地理数据…";
+
+                var geodataProgress = new Progress<double>(p =>
+                    KernelStatusText = $"正在下载地理数据… {p * 100:0}%");
+                await _host.KernelUpdate.EnsureGeodataAsync(geodataProgress);
+
+                if (await _host.Settings.GetBoolAsync("core.tun"))
+                    await _host.KernelUpdate.EnsureWintunAsync();
+
+                KernelStatusText = $"内核已更新到 {target}";
+            }
+            else
+            {
+                KernelStatusText = "内核更新失败";
+            }
+        }
+        catch (Exception ex)
+        {
+            KernelStatusText = $"更新失败：{ex.Message}";
+        }
+        finally
+        {
+            KernelProgressVisible = false;
+            IsKernelBusy = false;
+            if (wasRunning) await _host.Core.StartAsync();
+        }
+    }
+
+    [RelayCommand]
+    private async Task LaunchElevatedHostAsync()
+    {
+        try
+        {
+            var ok = _host.Elevated.LaunchElevatedHost();
+            await Task.Delay(1200);
+            ElevatedHostStatus = _host.Elevated.IsElevatedHostRunning ? "运行中" : "未运行";
+            StatusText = ok ? "已请求管理员权限启动提权宿主" : "提权宿主启动失败";
+        }
+        catch (Exception ex)
+        {
+            StatusText = $"启动提权宿主失败：{ex.Message}";
+        }
+    }
+
+    [RelayCommand]
+    private async Task ShutdownElevatedHostAsync()
+    {
+        try
+        {
+            await _host.Elevated.ShutdownAsync();
+            ElevatedHostStatus = "未运行";
+            StatusText = "提权宿主已退出";
+        }
+        catch (Exception ex)
+        {
+            StatusText = $"退出提权宿主失败：{ex.Message}";
+        }
+    }
+
+    partial void OnAutoCheckAppUpdateChanged(bool value)
+    {
+        if (_loading) return;
+        _ = _host.Settings.SetBoolAsync("ui.autoCheckAppUpdate", value);
+        StatusText = value ? "已开启启动时自动检查更新" : "已关闭启动时自动检查更新";
+    }
+
+    [RelayCommand]
+    private async Task CheckAppAsync()
+    {
+        IsAppBusy = true;
+        AppStatusText = "正在检查更新…";
+        try
+        {
+            var info = await _host.AppUpdate.CheckAsync();
+            ApplyCachedAppUpdate();
+            AppStatusText = info.Error is not null
+                ? $"检查失败：{info.Error}"
+                : info.HasUpdate ? "发现新版本" : "已是最新";
+        }
+        catch (Exception ex)
+        {
+            AppStatusText = $"检查失败：{ex.Message}";
+        }
+        finally
+        {
+            IsAppBusy = false;
+        }
+    }
+
+    [RelayCommand]
+    private async Task UpdateAppAsync()
+    {
+        var main = global::ClashM.App.App.Main;
+        if (main is null) return;
+
+        IsAppBusy = true;
+        AppProgress = 0;
+        AppProgressVisible = true;
+        AppStatusText = "正在下载更新…";
+        try
+        {
+            var progress = new Progress<double>(p => AppProgress = p);
+            var info = await _host.AppUpdate.PrepareUpdateAsync(progress);
+            if (info.Error is not null)
+            {
+                AppStatusText = $"更新失败：{info.Error}";
+                return;
+            }
+
+            AppStatusText = "正在应用更新…";
+            // 退出前先停内核/TUN/系统代理，再启动更新脚本并退出；脚本完成后自动重启并拉启内核。
+            global::ClashM.App.App.Main?.ExitForUpdate();
+        }
+        catch (Exception ex)
+        {
+            AppStatusText = $"更新失败：{ex.Message}";
+        }
+        finally
+        {
+            IsAppBusy = false;
+            AppProgressVisible = false;
+        }
+    }
+
+    private void ApplyCachedAppUpdate()
+    {
+        var info = global::ClashM.Core.Services.AppUpdateService.LastResult;
+        if (info is null) return;
+        LatestAppVersion = info.LatestVersion ?? "—";
+        AppHasUpdate = info.HasUpdate;
+        if (info.Error is not null) AppStatusText = $"检查失败：{info.Error}";
+    }
+}
