@@ -1,0 +1,185 @@
+using System.Collections.ObjectModel;
+using CommunityToolkit.Mvvm.ComponentModel;
+using ClashM.App.ViewModels;
+using ClashM.Core.Models;
+
+namespace ClashM.App.Mini;
+
+public sealed partial class MiniProxyNodeViewModel : ObservableObject
+{
+    public string Name { get; }
+
+    [ObservableProperty]
+    public partial int? Delay { get; set; }
+
+    public string DelayText => Delay switch
+    {
+        null or < 0 => "",
+        0 => "超时",
+        _ => $"{Delay} ms",
+    };
+
+    public string DelayKey => Delay switch
+    {
+        null or < 0 => "none",
+        0 => "timeout",
+        <= 150 => "good",
+        <= 350 => "medium",
+        _ => "bad",
+    };
+
+    public MiniProxyNodeViewModel(string name) => Name = name;
+
+    partial void OnDelayChanged(int? value)
+    {
+        OnPropertyChanged(nameof(DelayText));
+        OnPropertyChanged(nameof(DelayKey));
+    }
+
+    public override string ToString() => Name;
+}
+
+public sealed partial class MiniProxyGroupViewModel : ObservableObject
+{
+    public string Name { get; }
+
+    public ObservableCollection<MiniProxyNodeViewModel> Nodes { get; } = new();
+
+    [ObservableProperty]
+    public partial MiniProxyNodeViewModel? Selected { get; set; }
+
+    [ObservableProperty]
+    public partial bool IsTesting { get; set; }
+
+    private int _selectionSyncDepth;
+
+    /// <summary>
+    /// 程序化改动 Nodes/Selected 期间为 true。
+    ///
+    /// 迷你面板的下拉框监听 SelectionChanged，但集合 Clear/Add/Move 或重推 Selected
+    /// 都会让 ComboBox 自己产生一次选择变更。这类事件不是用户操作，绝不能回写内核：
+    /// 会导致重启或刷新订阅后，该组被「选中」到排序后的相邻节点（例如直连组跳到手动），
+    /// 并且被 RememberAsync 当成用户选择持久化，越偏越远。
+    /// </summary>
+    public bool IsSyncingSelection => _selectionSyncDepth > 0;
+
+    public MiniProxyGroupViewModel(string name) => Name = name;
+
+    public void Fill(IReadOnlyList<string> members, IReadOnlyDictionary<string, ProxyItem> all, string? now)
+    {
+        _selectionSyncDepth++;
+        try
+        {
+            FillCore(members, all, now);
+        }
+        finally
+        {
+            _selectionSyncDepth--;
+        }
+    }
+
+    private void FillCore(IReadOnlyList<string> members, IReadOnlyDictionary<string, ProxyItem> all, string? now)
+    {
+        var names = new List<string>();
+        foreach (var member in members)
+        {
+            if (all.ContainsKey(member)) names.Add(member);
+        }
+
+        var unchanged = names.Count == Nodes.Count;
+        if (unchanged)
+        {
+            for (var i = 0; i < names.Count; i++)
+            {
+                if (!string.Equals(Nodes[i].Name, names[i], StringComparison.Ordinal))
+                {
+                    unchanged = false;
+                    break;
+                }
+            }
+        }
+
+        if (!unchanged)
+        {
+            Nodes.Clear();
+            foreach (var name in names) Nodes.Add(new MiniProxyNodeViewModel(name));
+        }
+
+        foreach (var node in Nodes)
+        {
+            if (!all.TryGetValue(node.Name, out var item)) continue;
+            // 全局缓存优先：内核快照里的值可能是旧的，且策略组在快照里恒为 null。
+            node.Delay = DelayCache.Get(node.Name) ?? item.Delay;
+        }
+
+        // 以 API 的当前选中项为准同步选择（跨面板切换节点时生效）；
+        // now 无效时保留已有选择，避免重排/刷新把选择清空。测速走 ApplyMeasuredDelays，不经过这里。
+        var target = now is null ? null : Nodes.FirstOrDefault(n => n.Name == now);
+        if (target is not null)
+            Selected = target;
+        else if (Selected is null || !Nodes.Contains(Selected))
+            Selected = Nodes.FirstOrDefault();
+
+        SortByDelayCore();
+    }
+
+    /// <summary>按延迟排序：有效延迟在前且升序，超时/未测速在后。</summary>
+    public void SortByDelay()
+    {
+        _selectionSyncDepth++;
+        try
+        {
+            SortByDelayCore();
+        }
+        finally
+        {
+            _selectionSyncDepth--;
+        }
+    }
+
+    private void SortByDelayCore()
+    {
+        var sorted = Nodes
+            .OrderBy(n => n.Delay is > 0 ? 0 : 1)
+            .ThenBy(n => n.Delay is > 0 ? n.Delay!.Value : int.MaxValue)
+            .ThenBy(n => n.Name, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        var inOrder = sorted.Count == Nodes.Count;
+        if (inOrder)
+        {
+            for (var i = 0; i < sorted.Count; i++)
+            {
+                if (!ReferenceEquals(Nodes[i], sorted[i]))
+                {
+                    inOrder = false;
+                    break;
+                }
+            }
+        }
+        if (inOrder) return;
+
+        for (var i = 0; i < sorted.Count; i++)
+        {
+            var current = Nodes.IndexOf(sorted[i]);
+            if (current != i) Nodes.Move(current, i);
+        }
+
+        // Move 会让 ComboBox 丢失 SelectedItem；强制重推同一引用以恢复选择。
+        OnPropertyChanged(nameof(Selected));
+    }
+
+    /// <summary>
+    /// 增量写入一批测速结果：只更新本批出现的节点，不把还没测到的节点清成超时。
+    /// 不排序——测速过程中每 200ms 就重排一次列表会让节点在选择器里跳来跳去，
+    /// 等整组测完再统一 <see cref="SortByDelay"/>。
+    /// </summary>
+    public void ApplyMeasuredDelays(IReadOnlyDictionary<string, int> delays)
+    {
+        foreach (var node in Nodes)
+        {
+            if (delays.TryGetValue(node.Name, out var d))
+                node.Delay = d > 0 ? d : 0;
+        }
+    }
+}

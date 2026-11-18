@@ -1,0 +1,292 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '版本号（如 0.1.0），留空则用 Directory.Build.props 里的值'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+env:
+  DOTNET_VERSION: '10.0.x'
+  DOTNET_NOLOGO: true
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: true
+  CONFIGURATION: Release
+
+jobs:
+  build:
+    name: Build (${{ matrix.arch }} / ${{ matrix.variant }})
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # ---- 合并版（自包含：自带 .NET 与 WinUI 运行时，解压即用）----
+          # 精简版：不含内核与 geodata，首次启动联网下载（体积小）
+          - arch: x64
+            rid: win-x64
+            platform: x64
+            variant: slim
+            selfContained: true
+            winuiSelfContained: true
+            karch: amd64
+          - arch: arm64
+            rid: win-arm64
+            platform: ARM64
+            variant: slim
+            selfContained: true
+            winuiSelfContained: true
+            karch: arm64
+          # 完整版：内置内核与 geodata，开箱即用（体积大）
+          - arch: x64
+            rid: win-x64
+            platform: x64
+            variant: full
+            selfContained: true
+            winuiSelfContained: true
+            karch: amd64
+          - arch: arm64
+            rid: win-arm64
+            platform: ARM64
+            variant: full
+            selfContained: true
+            winuiSelfContained: true
+            karch: arm64
+          # ---- 分离版（框架依赖：需系统已装 .NET 10 与 Windows App Runtime 2.x）----
+          # 仅 x64，体积最小。
+          - arch: x64
+            rid: win-x64
+            platform: x64
+            variant: sep
+            selfContained: false
+            winuiSelfContained: false
+            karch: amd64
+          - arch: x64
+            rid: win-x64
+            platform: x64
+            variant: full-sep
+            selfContained: false
+            winuiSelfContained: false
+            karch: amd64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Resolve version
+        id: ver
+        shell: pwsh
+        run: |
+          $v = "${{ github.event.inputs.version }}"
+          if ([string]::IsNullOrWhiteSpace($v) -and $env:GITHUB_REF -like 'refs/tags/v*') {
+            $v = $env:GITHUB_REF -replace '^refs/tags/v', ''
+          }
+          if ([string]::IsNullOrWhiteSpace($v)) { $v = '0.1.0' }
+          "version=$v" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          Write-Host "Resolved version: $v"
+
+      - name: Publish
+        shell: pwsh
+        run: |
+          dotnet publish src/ClashM.App/ClashM.App.csproj `
+            -c $env:CONFIGURATION `
+            -r ${{ matrix.rid }} `
+            -p:SelfContained=${{ matrix.selfContained }} `
+            -p:WindowsAppSDKSelfContained=${{ matrix.winuiSelfContained }} `
+            -p:Platform=${{ matrix.platform }} `
+            -p:Version=${{ steps.ver.outputs.version }} `
+            -o publish
+
+      - name: Fetch bundled kernel & geodata
+        if: contains(matrix.variant, 'full')
+        shell: pwsh
+        run: |
+          pwsh -File build/fetch-bundle.ps1 -DestDir "publish/bundled" -Arch ${{ matrix.karch }}
+
+      - name: Package portable zip
+        shell: pwsh
+        run: |
+          $ver = "${{ steps.ver.outputs.version }}"
+          # 合并版：portable / full；分离版：sep / full-sep。
+          $variant = "${{ matrix.variant }}"
+          $suffix = switch ($variant) {
+            'full'     { 'full' }
+            'sep'      { 'sep' }
+            'full-sep' { 'full-sep' }
+            default    { 'portable' }
+          }
+          $zip = "ClashM-$ver-${{ matrix.arch }}-$suffix.zip"
+          Compress-Archive -Path "publish/*" -DestinationPath $zip -CompressionLevel Optimal
+          Write-Host "Created $zip"
+
+      - name: Install Inno Setup
+        if: matrix.arch == 'x64'
+        shell: pwsh
+        run: choco install innosetup --no-progress -y
+
+      - name: Fetch Simplified Chinese language file
+        if: matrix.arch == 'x64'
+        shell: pwsh
+        run: |
+          $dir = "build\languages"
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          $path = "Files/Languages/ChineseSimplified.isl"
+          $urls = @(
+            "https://raw.githubusercontent.com/jrsoftware/issrc/main/$path",
+            "https://gh-proxy.org/https://raw.githubusercontent.com/jrsoftware/issrc/main/$path",
+            "https://ghproxy.net/https://raw.githubusercontent.com/jrsoftware/issrc/main/$path"
+          )
+          foreach ($u in $urls) {
+            try {
+              Invoke-WebRequest -Uri $u -OutFile "$dir\ChineseSimplified.isl" -TimeoutSec 30
+              Write-Host "Downloaded ChineseSimplified.isl from $u"
+              break
+            } catch {
+              Write-Host "::warning::下载失败：$u"
+            }
+          }
+
+      - name: Build installer
+        if: matrix.arch == 'x64'
+        shell: pwsh
+        run: |
+          $ver = "${{ steps.ver.outputs.version }}"
+          # NameSuffix 直接决定安装包文件名：ClashM-<ver>-x64<NameSuffix>-setup.exe
+          $variant = "${{ matrix.variant }}"
+          $suffix = switch ($variant) {
+            'full'     { '-full' }
+            'sep'      { '-sep' }
+            'full-sep' { '-full-sep' }
+            default    { '' }
+          }
+          # 分离版安装器需检测系统运行时，传入标记。
+          $runtimeCheck = if ($variant -eq 'sep' -or $variant -eq 'full-sep') { '1' } else { '0' }
+          $isl = "${{ github.workspace }}\build\languages\ChineseSimplified.isl"
+          $args = @(
+            "/DAppVersion=$ver",
+            "/DNameSuffix=$suffix",
+            "/DRequireRuntime=$runtimeCheck",
+            "/DSourceDir=${{ github.workspace }}\publish",
+            "/DOutputDir=${{ github.workspace }}",
+            "build\installer.iss"
+          )
+          if (Test-Path $isl) { $args = @("/DChineseISL=$isl") + $args }
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" @args
+          Get-ChildItem *.exe | ForEach-Object { Write-Host $_.Name }
+
+      - name: Build MSIX package
+        if: matrix.arch == 'x64' && matrix.variant == 'slim'
+        shell: pwsh
+        run: |
+          $ver = "${{ steps.ver.outputs.version }}"
+          # MSIX 源必须用 WindowsPackageType=MSIX 重新发布：只有该形态内嵌
+          # highestAvailable（requireAdministrator 会被 AppModel 以 0x800702E4 拒绝），
+          # 并携带 msix 身份元素。单独发布到 publish-msix，避免污染 Inno 用的 publish。
+          dotnet publish src/ClashM.App/ClashM.App.csproj `
+            -c $env:CONFIGURATION `
+            -r win-x64 `
+            -p:SelfContained=${{ matrix.selfContained }} `
+            -p:WindowsAppSDKSelfContained=${{ matrix.winuiSelfContained }} `
+            -p:Platform=x64 `
+            -p:WindowsPackageType=MSIX `
+            -p:Version=$ver `
+            -o publish-msix
+          $publisher = "${{ secrets.MSIX_PUBLISHER }}"
+          if ([string]::IsNullOrWhiteSpace($publisher)) { $publisher = 'CN=assassin321' }
+          $certPath = "${{ github.workspace }}\build\msix-signing.pfx"
+          $hasCert = $false
+          if ("${{ secrets.MSIX_CERT_PFX_BASE64 }}") {
+            [IO.File]::WriteAllBytes($certPath, [Convert]::FromBase64String("${{ secrets.MSIX_CERT_PFX_BASE64 }}"))
+            $hasCert = $true
+          }
+          # 生成 [Version].0 形式的四段版本号（MSIX 要求）。
+          $appxVer = "$ver.0"
+          $args = @{
+            Version   = $appxVer
+            SourceDir = "${{ github.workspace }}\publish-msix"
+            OutputDir = "${{ github.workspace }}"
+            Publisher = $publisher
+            Arch      = 'x64'
+          }
+          if ($hasCert) {
+            $args.CertPath = $certPath
+            $args.CertPassword = "${{ secrets.MSIX_CERT_PASSWORD }}"
+            # 导出公钥证书（.cer）随发布一起提供，供用户导入「受信任人」存储后安装。
+            $cerPath = "${{ github.workspace }}\clashm-signing.cer"
+            $sec = ConvertTo-SecureString -String "${{ secrets.MSIX_CERT_PASSWORD }}" -Force -AsPlainText
+            $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2($certPath, $sec)
+            [IO.File]::WriteAllBytes($cerPath, $cert.Export([System.Security.Cryptography.X509Certificates.X509ContentType]::Cert))
+            Write-Host "已导出签名证书公钥：clashm-signing.cer"
+          }
+          pwsh -File build/msix.ps1 @args
+          Get-ChildItem *.msix | ForEach-Object { Write-Host $_.Name }
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: ClashM-${{ matrix.arch }}-${{ matrix.variant }}
+          path: |
+            ClashM-*.zip
+            ClashM-*-setup.exe
+            ClashM-*.msix
+            clashm-signing.cer
+          if-no-files-found: warn
+
+  release:
+    name: Create Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: List artifacts
+        shell: pwsh
+        run: Get-ChildItem artifacts -Recurse | Select-Object Name, Length
+
+      - name: Resolve version & previous tag
+        id: meta
+        shell: pwsh
+        run: |
+          $v = $env:GITHUB_REF -replace '^refs/tags/v', ''
+          "version=$v" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          $prev = git describe --tags --abbrev=0 "v$v^" 2>$null
+          "previous=$prev" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          Write-Host "version=$v previous=$prev"
+
+      - name: Generate release notes
+        shell: pwsh
+        run: |
+          pwsh -File .github/scripts/gen-release-notes.ps1 `
+            -Version "${{ steps.meta.outputs.version }}" `
+            -ArtifactsDir "${{ github.workspace }}/artifacts" `
+            -OutputPath "${{ github.workspace }}/release-notes.md" `
+            -PreviousTag "${{ steps.meta.outputs.previous }}"
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v3
+        with:
+          files: artifacts/*
+          body_path: release-notes.md
+          draft: false

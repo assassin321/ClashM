@@ -1,0 +1,542 @@
+using System.Collections.ObjectModel;
+using CommunityToolkit.Mvvm.ComponentModel;
+using CommunityToolkit.Mvvm.Input;
+using Microsoft.UI.Dispatching;
+using ClashM.Core.Services;
+
+namespace ClashM.App.ViewModels;
+
+public sealed partial class ProfileRowViewModel : ObservableObject
+{
+    public long Id { get; }
+    public string Name { get; }
+    public string KindText { get; }
+    public string? Source { get; }
+    public string UpdatedText { get; }
+    public string? SubscriptionUserInfo { get; }
+
+    [ObservableProperty]
+    public partial bool IsActive { get; set; }
+
+    [ObservableProperty]
+    public partial bool IsRefreshing { get; set; }
+
+    /// <summary>点击卡片后、配置真正应用完成前为 true，卡片会盖上进度遮罩。</summary>
+    [ObservableProperty]
+    public partial bool IsActivating { get; set; }
+
+    public string SourceText => string.IsNullOrEmpty(Source) ? "本地" : Source!;
+
+    /// <summary>剩余流量百分比：进度条满格表示余量充足，和「剩余」文案保持一致。</summary>
+    public double RemainingPercent { get; }
+
+    public bool HasUsageBar { get; }
+
+    public string ExpireText { get; }
+
+    /// <summary>没有到期信息时整行隐藏，避免卡片中间留一条空白行。</summary>
+    public bool HasExpire => !string.IsNullOrEmpty(ExpireText);
+
+    public string UsageText { get; }
+
+    /// <summary>该订阅挂载的覆写名称；空列表表示没有覆写。</summary>
+    public IReadOnlyList<string> OverrideNames { get; }
+
+    public bool HasOverrides => OverrideNames.Count > 0;
+
+    /// <summary>卡片底部展示的覆写摘要，例如「覆写 2 项」。</summary>
+    public string OverrideText => OverrideNames.Count == 0
+        ? ""
+        : $"覆写 {OverrideNames.Count} 项";
+
+    /// <summary>鼠标悬停时列出具体覆写名称，按合并顺序排列。</summary>
+    public string OverrideTooltip => string.Join("\n", OverrideNames);
+
+    public ProfileRowViewModel(ProfileItem item, IReadOnlyList<string>? overrideNames = null)
+    {
+        Id = item.Id;
+        Name = item.Name;
+        KindText = item.KindText;
+        Source = item.Source;
+        UpdatedText = item.UpdatedText;
+        SubscriptionUserInfo = item.SubscriptionUserInfo;
+        IsActive = item.IsActive;
+        OverrideNames = overrideNames ?? Array.Empty<string>();
+
+        var info = SubscriptionUsage.Parse(item.SubscriptionUserInfo);
+        if (info is not null && info.Total > 0)
+        {
+            RemainingPercent = 100 - Math.Clamp(info.Used * 100.0 / info.Total, 0, 100);
+            HasUsageBar = true;
+            UsageText = $"剩余 {Format.Bytes(Math.Max(0, info.Total - info.Used))} / {Format.Bytes(info.Total)}";
+        }
+        else if (info is not null)
+        {
+            UsageText = $"↑ {Format.Bytes(info.Upload)}  ↓ {Format.Bytes(info.Download)}";
+        }
+        else
+        {
+            UsageText = "";
+        }
+
+        ExpireText = info is null
+            ? ""
+            : SubscriptionUsage.FormatExpire(info.Expire);
+    }
+}
+
+public sealed partial class ProfilesViewModel : ObservableObject
+{
+    private readonly ClashMHost _host;
+    private readonly DispatcherQueue _dispatcher;
+
+    public ObservableCollection<ProfileRowViewModel> Items { get; } = new();
+
+    [ObservableProperty]
+    public partial string StatusText { get; set; } = "";
+
+    [ObservableProperty]
+    public partial bool IsBusy { get; set; }
+
+    [ObservableProperty]
+    public partial bool HasItems { get; set; }
+
+    [ObservableProperty]
+    public partial string ImportUrl { get; set; } = "";
+
+    [ObservableProperty]
+    public partial string ImportName { get; set; } = "";
+
+    /// <summary>订阅地址变化时清空名称，让导入时用订阅响应头里的名称作为默认。</summary>
+    partial void OnImportUrlChanged(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            ImportName = "";
+        }
+    }
+
+    [ObservableProperty]
+    public partial bool AutoUpdate { get; set; } = true;
+
+    [ObservableProperty]
+    public partial bool IsEditorOpen { get; set; }
+
+    [ObservableProperty]
+    public partial bool IsEditorBusy { get; set; }
+
+    [ObservableProperty]
+    public partial string EditorTitle { get; set; } = "";
+
+    [ObservableProperty]
+    public partial string EditorText { get; set; } = "";
+
+    [ObservableProperty]
+    public partial string RuntimePreview { get; set; } = "";
+
+    [ObservableProperty]
+    public partial int EditorTabIndex { get; set; }
+
+    public bool IsRawTab => EditorTabIndex == 0;
+
+    public bool IsRuntimeTab => EditorTabIndex == 1;
+
+    private ProfileRowViewModel? _editorRow;
+
+    partial void OnEditorTabIndexChanged(int value)
+    {
+        OnPropertyChanged(nameof(IsRawTab));
+        OnPropertyChanged(nameof(IsRuntimeTab));
+    }
+
+    public ProfilesViewModel(ClashMHost host, DispatcherQueue dispatcher)
+    {
+        _host = host;
+        _dispatcher = dispatcher;
+    }
+
+    public async Task LoadAsync()
+    {
+        IsBusy = true;
+        try
+        {
+            AutoUpdate = await _host.Settings.GetBoolAsync("profile.autoUpdate", true);
+            var list = await _host.Profiles.ListAsync();
+            var overrides = await _host.Overrides.ListAsync();
+            var overrideNames = overrides.ToDictionary(o => o.Id, o => o.Name);
+
+            // 每个订阅各自取挂载列表，用于卡片上展示"覆写 N 项"。
+            var mounts = new Dictionary<long, IReadOnlyList<string>>();
+            foreach (var item in list)
+            {
+                var ids = await _host.Overrides.GetProfileOverridesAsync(item.Id);
+                mounts[item.Id] = ids
+                    .Where(overrideNames.ContainsKey)
+                    .Select(id => overrideNames[id])
+                    .ToList();
+            }
+
+            _dispatcher.TryEnqueue(() =>
+            {
+                Items.Clear();
+                foreach (var item in list)
+                    Items.Add(new ProfileRowViewModel(item, mounts[item.Id]));
+                HasItems = Items.Count > 0;
+                StatusText = Items.Count == 0 ? "尚无配置文件" : $"共 {Items.Count} 个配置";
+            });
+        }
+        catch (Exception ex)
+        {
+            StatusText = $"加载失败：{ex.Message}";
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    [RelayCommand]
+    private async Task ImportUrlAsync()
+    {
+        var url = ImportUrl?.Trim();
+        if (string.IsNullOrEmpty(url))
+        {
+            StatusText = "请输入订阅链接";
+            return;
+        }
+
+        IsBusy = true;
+        StatusText = "正在下载订阅…";
+        try
+        {
+            var item = await _host.Profiles.ImportFromUrlAsync(url, string.IsNullOrWhiteSpace(ImportName) ? null : ImportName);
+            StatusText = $"已导入 {item.Name}";
+            ImportUrl = "";
+            ImportName = "";
+            // 导入即应用：生成 runtime 配置并热重载内核，避免出现“已激活但无节点”。
+            await _host.ApplyActiveProfileAsync();
+            await LoadAsync();
+        }
+        catch (Exception ex)
+        {
+            StatusText = $"导入失败：{ex.Message}";
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    [RelayCommand]
+    private async Task ImportFileAsync()
+    {
+        try
+        {
+            var picker = new Windows.Storage.Pickers.FileOpenPicker();
+            var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(global::ClashM.App.App.Main);
+            WinRT.Interop.InitializeWithWindow.Initialize(picker, hwnd);
+            picker.FileTypeFilter.Add(".yaml");
+            picker.FileTypeFilter.Add(".yml");
+            picker.FileTypeFilter.Add(".txt");
+
+            var file = await picker.PickSingleFileAsync();
+            if (file is null) return;
+
+            IsBusy = true;
+            StatusText = "正在导入文件…";
+            var item = await _host.Profiles.ImportFromFileAsync(file.Path);
+            StatusText = $"已导入 {item.Name}";
+            // 导入即应用：生成 runtime 配置并热重载内核。
+            await _host.ApplyActiveProfileAsync();
+            await LoadAsync();
+        }
+        catch (Exception ex)
+        {
+            StatusText = $"导入失败：{ex.Message}";
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    [RelayCommand]
+    private async Task ActivateAsync(ProfileRowViewModel? row)
+    {
+        if (row is null) return;
+        row.IsActivating = true;
+        IsBusy = true;
+        try
+        {
+            await _host.Profiles.SetActiveAsync(row.Id);
+            StatusText = $"正在应用 {row.Name}…";
+            var applied = await _host.ApplyActiveProfileAsync();
+            StatusText = applied ? $"已切换到 {row.Name}" : $"已切换，但内核未能应用新配置（详见 core.log）";
+            await LoadAsync();
+        }
+        catch (Exception ex)
+        {
+            StatusText = $"切换失败：{ex.Message}";
+        }
+        finally
+        {
+            row.IsActivating = false;
+            IsBusy = false;
+        }
+    }
+
+    [RelayCommand]
+    private async Task RefreshAsync(ProfileRowViewModel? row)
+    {
+        if (row is null) return;
+        row.IsRefreshing = true;
+        IsBusy = true;
+        StatusText = $"正在刷新 {row.Name}…";
+        try
+        {
+            var ok = await _host.Profiles.RefreshAsync(row.Id);
+            if (ok)
+            {
+                if (row.IsActive)
+                {
+                    // 刷新后必须确认配置真正进了内核：热重载被拒时内核会保留旧配置，
+                    // 只报「已更新」会让用户以为节点已经变了。
+                    var applied = await _host.ApplyActiveProfileAsync();
+                    StatusText = applied
+                        ? $"已更新 {row.Name}"
+                        : $"已下载 {row.Name}，但内核未能应用新配置（详见 core.log）";
+                }
+                else
+                {
+                    StatusText = $"已更新 {row.Name}";
+                }
+            }
+            else
+            {
+                StatusText = $"刷新失败：该配置无订阅来源";
+            }
+            // LoadAsync 会重建列表，刷新状态自然重置。
+            await LoadAsync();
+        }
+        catch (Exception ex)
+        {
+            StatusText = $"刷新失败：{ex.Message}";
+        }
+        finally
+        {
+            row.IsRefreshing = false;
+            IsBusy = false;
+        }
+    }
+
+    [RelayCommand]
+    private async Task DeleteAsync(ProfileRowViewModel? row)
+    {
+        if (row is null) return;
+        try
+        {
+            await _host.Profiles.DeleteAsync(row.Id);
+            StatusText = $"已删除 {row.Name}";
+            await LoadAsync();
+        }
+        catch (Exception ex)
+        {
+            StatusText = $"删除失败：{ex.Message}";
+        }
+    }
+
+    [RelayCommand]
+    private async Task RefreshAllAsync()
+    {
+        IsBusy = true;
+        var count = 0;
+        try
+        {
+            foreach (var item in Items.Where(i => i.Source is not null && i.KindText == "订阅链接").ToList())
+            {
+                if (await _host.Profiles.RefreshAsync(item.Id)) count++;
+            }
+            await _host.ApplyActiveProfileAsync();
+            StatusText = $"已刷新 {count} 个订阅";
+            await LoadAsync();
+        }
+        catch (Exception ex)
+        {
+            StatusText = $"刷新失败：{ex.Message}";
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    [RelayCommand]
+    private async Task ToggleAutoUpdateAsync()
+    {
+        await _host.Settings.SetBoolAsync("profile.autoUpdate", AutoUpdate);
+        StatusText = AutoUpdate ? "已开启订阅自动更新（每小时）" : "已关闭订阅自动更新";
+    }
+
+    [RelayCommand]
+    private async Task RenameAsync(ProfileRowViewModel? row)
+    {
+        if (row is null) return;
+        var dialog = new Microsoft.UI.Xaml.Controls.ContentDialog
+        {
+            Title = "重命名配置",
+            PrimaryButtonText = "确定",
+            CloseButtonText = "取消",
+            DefaultButton = Microsoft.UI.Xaml.Controls.ContentDialogButton.Primary,
+            XamlRoot = global::ClashM.App.App.Main?.Content?.XamlRoot,
+        };
+        var box = new Microsoft.UI.Xaml.Controls.TextBox { Text = row.Name };
+        dialog.Content = box;
+        var result = await ClashM.App.Pages.DialogGuard.ShowAsync(dialog);
+        if (result != Microsoft.UI.Xaml.Controls.ContentDialogResult.Primary) return;
+
+        var name = box.Text?.Trim();
+        if (string.IsNullOrEmpty(name)) return;
+
+        await _host.Profiles.RenameAsync(row.Id, name);
+        StatusText = $"已重命名为 {name}";
+        await LoadAsync();
+    }
+
+    /// <summary>打开页内配置编辑器：加载原始 YAML，运行时预览在切到该标签时惰性生成。</summary>
+    [RelayCommand]
+    private async Task OpenEditorAsync(ProfileRowViewModel? row)
+    {
+        if (row is null) return;
+
+        var content = await _host.Profiles.ReadContentAsync(row.Id);
+        if (content is null)
+        {
+            StatusText = "无法读取配置内容";
+            return;
+        }
+
+        _editorRow = row;
+        EditorTitle = $"编辑：{row.Name}";
+        EditorText = ToDisplayText(content);
+        RuntimePreview = "";
+        EditorTabIndex = 0;
+        IsEditorOpen = true;
+    }
+
+    /// <summary>
+    /// 把订阅原文转成编辑器里显示的样子。
+    ///
+    /// 两件事：
+    /// 1. WinUI 的 TextBox/RichEditBox 只认 \r 作换行，LF 要统一成 CRLF；
+    /// 2. 订阅文件里的 emoji 大多被写成 "\U0001F1EC\U0001F1E7 伦敦" 这种转义
+    ///    （订阅服务端或我们自己的 YAML 序列化产物），直接显示是一串反斜杠，
+    ///    完全没法读。这里在显示层还原成真实 emoji。
+    ///
+    /// 注意只影响显示：保存时由 <see cref="ToStorageText"/> 把 emoji 对称地转回 \U 形式，
+    /// 因此「打开一次再保存」不会改动文件内容（已用真实订阅验证逐字节一致）。
+    /// </summary>
+    private static string ToDisplayText(string text)
+    {
+        var normalized = text.Replace("\r\n", "\n").Replace("\r", "\n");
+        var unescaped = YamlOverrideMerger.UnescapeUnicodeInDoubleQuoted(normalized);
+        return unescaped.Replace("\n", "\r\n");
+    }
+
+    /// <summary>
+    /// 把编辑器的文本还原成落盘格式。
+    ///
+    /// 1. CRLF → LF，与订阅原始文件保持一致；
+    /// 2. 把显示层还原出来的 emoji 再转回 \U 转义形式。
+    ///    编辑器里为了让用户看懂做了反转义（<see cref="ToDisplayText"/>），
+    ///    保存必须对称地转回去，否则「打开一次再保存」会把整份订阅的 emoji
+    ///    全部改写成裸字符，diff 一片红。
+    /// </summary>
+    private static string ToStorageText(string text)
+        => YamlOverrideMerger.EscapeUnicodeInDoubleQuoted(
+            text.Replace("\r\n", "\n").Replace("\r", "\n"));
+
+    [RelayCommand]
+    private void CloseEditor()
+    {
+        IsEditorOpen = false;
+        _editorRow = null;
+        EditorText = "";
+        RuntimePreview = "";
+        EditorError = "";
+    }
+
+    [RelayCommand]
+    private async Task SaveEditorAsync()
+    {
+        if (_editorRow is null) return;
+        var row = _editorRow;
+
+        try
+        {
+            var ok = await _host.Profiles.SaveContentAsync(row.Id, ToStorageText(EditorText));
+            if (!ok)
+            {
+                EditorError = "保存失败：无法写入订阅文件（检查数据目录是否可写）";
+                return;
+            }
+
+            if (row.IsActive)
+            {
+                // 应用失败（内核起不来、配置被拒）不应让整个保存流程炸掉，
+                // 至少要把「已保存但没生效」说清楚。
+                var applied = await _host.ApplyActiveProfileAsync();
+                StatusText = applied ? "已保存并热重载" : "已保存，但内核未能应用新配置（详见 core.log）";
+            }
+            else
+            {
+                StatusText = "已保存";
+            }
+
+            // 保存成功就收起编辑器。
+            //
+            // 之前这里只改了 StatusText，而 StatusText 只显示在页面副标题上——
+            // 编辑弹窗是盖住整页的，用户根本看不到那行字，于是「点保存没反应」。
+            // 现在：成功则关闭弹窗；失败则把原因显示在弹窗内的错误条上。
+            CloseEditor();
+
+            await LoadAsync();
+        }
+        catch (Exception ex)
+        {
+            // SaveContentAsync 会对非法 YAML 抛 InvalidOperationException；
+            // 其余（磁盘写失败等）也一并在这里落地，不让异常冒到 async void 的调用方。
+            EditorError = $"保存失败：{ex.Message}";
+            StatusText = $"保存失败：{ex.Message}";
+        }
+    }
+
+    /// <summary>编辑器内的错误提示（显示在弹窗里，用户能直接看到）。</summary>
+    [ObservableProperty]
+    public partial string EditorError { get; set; } = "";
+
+    [ObservableProperty]
+    public partial bool HasEditorError { get; set; }
+
+    partial void OnEditorErrorChanged(string value) => HasEditorError = !string.IsNullOrEmpty(value);
+
+    /// <summary>生成运行时配置文本：订阅原始内容叠加全局注入项（端口/DNS/TUN 等）。</summary>
+    public async Task LoadRuntimePreviewAsync()
+    {
+        if (_editorRow is null) return;
+
+        IsEditorBusy = true;
+        try
+        {
+            var options = await _host.BuildRuntimeOptionsAsync();
+            RuntimePreview = ToDisplayText(await _host.GenerateRuntimeYamlAsync(options));
+        }
+        catch (Exception ex)
+        {
+            RuntimePreview = $"无法生成运行时配置：{ex.Message}";
+        }
+        finally
+        {
+            IsEditorBusy = false;
+        }
+    }
+}
