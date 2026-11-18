@@ -272,18 +272,23 @@ jobs:
           $v = $env:GITHUB_REF -replace '^refs/tags/v', ''
           "version=$v" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           
-          # 使用 Parse 而不是 new
           $currentVer = [System.Version]::Parse($v)
-          $prev = git tag | Where-Object { 
-            $_ -match '^v\d+\.\d+\.\d+$'
-          } | ForEach-Object {
-            $tagVer = [System.Version]::Parse($_ -replace '^v', '')
-            if ($tagVer -lt $currentVer) { $_ }
-          } | Sort-Object { [System.Version]::Parse($_ -replace '^v', '') } -Descending | Select-Object -First 1
+          $allTags = git tag
+          $prev = ""
           
-          if (-not $prev) {
-              $prev = ""
+          foreach ($tag in $allTags) {
+            if ($tag -match '^v(\d+\.\d+\.\d+)$') {
+              $tagVerStr = $matches[1]
+              $tagVer = [System.Version]::Parse($tagVerStr)
+              if ($tagVer -lt $currentVer) {
+                if ([string]::IsNullOrEmpty($prev) -or $tagVer -gt [System.Version]::Parse($prev -replace '^v', '')) {
+                  $prev = $tag
+                }
+              }
+            }
           }
+          
+          if (-not $prev) { $prev = "" }
           
           "previous=$prev" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           Write-Host "version=$v previous=$prev"
