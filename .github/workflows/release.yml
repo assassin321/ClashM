@@ -100,6 +100,14 @@ jobs:
       - name: Publish
         shell: pwsh
         run: |
+          # 编译服务包装器到临时目录
+          dotnet build src/ClashM.ServiceWrapper/ClashM.ServiceWrapper.csproj `
+            -c $env:CONFIGURATION `
+            -r ${{ matrix.rid }} `
+            -p:Platform=${{ matrix.platform }} `
+            -o service-wrapper-temp
+          
+          # 发布主程序
           dotnet publish src/ClashM.App/ClashM.App.csproj `
             -c $env:CONFIGURATION `
             -r ${{ matrix.rid }} `
@@ -108,6 +116,9 @@ jobs:
             -p:Platform=${{ matrix.platform }} `
             -p:Version=${{ steps.ver.outputs.version }} `
             -o publish
+          
+          # 把服务包装器复制到 publish 目录
+          Copy-Item "service-wrapper-temp/*" "publish/" -Recurse -Force
 
       - name: Fetch bundled kernel & geodata
         if: contains(matrix.variant, 'full')
