@@ -271,25 +271,10 @@ jobs:
         run: |
           $v = $env:GITHUB_REF -replace '^refs/tags/v', ''
           "version=$v" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-          
-          $currentVer = [System.Version]::Parse($v)
-          $allTags = git tag
-          $prev = ""
-          
-          foreach ($tag in $allTags) {
-            if ($tag -match '^v(\d+\.\d+\.\d+)$') {
-              $tagVerStr = $matches[1]
-              $tagVer = [System.Version]::Parse($tagVerStr)
-              if ($tagVer -lt $currentVer) {
-                if ([string]::IsNullOrEmpty($prev) -or $tagVer -gt [System.Version]::Parse($prev -replace '^v', '')) {
-                  $prev = $tag
-                }
-              }
-            }
+          $prev = git tag --sort=-version:refname | Where-Object { $_ -lt "v$v" } | Select-Object -First 1
+          if (-not $prev) {
+              $prev = ""
           }
-          
-          if (-not $prev) { $prev = "" }
-          
           "previous=$prev" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           Write-Host "version=$v previous=$prev"
 
