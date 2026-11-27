@@ -76,7 +76,7 @@ Get-AppxPackage Microsoft.WindowsAppRuntime.2 | Select-Object Name, Version
 
 ## 注意事项
 
-- **管理员权限**：主程序需要管理员身份运行以支持 TUN。运行安装脚本install.bat以避免每次启动都要求管理员权限。
+- **管理员权限**：主程序需要管理员权限以支持 TUN。运行安装脚本 install.bat 以避免每次启动都要求管理员权限。
 - **分离版运行环境**：须预先安装 Windows App Runtime 2.6.4（x64）与 .NET 运行时 10.0（x64），安装器会检测并在缺失时给出下载地址，详见上方「分离版」章节。
 - **端口 7890 冲突**：若同时运行 clash-party 等占用 7890 端口的程序，ClashM 的混合端口将绑定失败，请在设置中改用其他端口（如 7897）。
 - **代码签名**：安装包未做代码签名，Windows SmartScreen 可能提示「未知发布者」，选择「仍要运行」即可。
