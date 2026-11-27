@@ -100,15 +100,6 @@ jobs:
       - name: Publish
         shell: pwsh
         run: |
-          # 清理所有项目的编译缓存
-          dotnet clean src/ClashM.App/ClashM.App.csproj -c $env:CONFIGURATION
-          dotnet clean src/ClashM.Elevated/ClashM.Elevated.csproj -c $env:CONFIGURATION
-          
-          # 删除 obj 目录（更彻底）
-          Remove-Item -Recurse -Force src/ClashM.App/obj -ErrorAction SilentlyContinue
-          Remove-Item -Recurse -Force src/ClashM.Elevated/obj -ErrorAction SilentlyContinue
-          
-          # 重新编译并发布
           dotnet publish src/ClashM.App/ClashM.App.csproj `
             -c $env:CONFIGURATION `
             -r ${{ matrix.rid }} `

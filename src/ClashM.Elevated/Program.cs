@@ -6,7 +6,6 @@ using System.Security.Principal;
 using System.Text;
 using System.Text.Json;
 using ClashM.Core.Services;
-using Microsoft.Extensions.Hosting;
 
 namespace ClashM.Elevated;
 
@@ -41,19 +40,6 @@ internal static class Program
     
     private static async Task<int> Main(string[] args)
     {
-        if (args.Length > 0 && args[0] == "--service")
-        {
-            using var host = Host.CreateDefaultBuilder(args)
-                .UseWindowsService(options =>
-                {
-                    options.ServiceName = "ClashM Elevated Service";
-                })
-                .Build();
-            
-            await host.RunAsync();
-            return 0;
-        }
-        
         if (!IsAdministrator())
         {
             Console.Error.WriteLine("ClashM.Elevated 需要管理员权限。");

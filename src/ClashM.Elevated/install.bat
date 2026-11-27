@@ -11,7 +11,7 @@ if %errorlevel% neq 0 (
 
 set SERVICE_NAME=ClashMElevated
 :: 直接指向 ClashM.Elevated.exe，不需要中间层
-set SERVICE_EXE=%~dp0ClashM.Elevated.exe --service
+set SERVICE_EXE=%~dp0ClashM.ServiceWrapper.exe
 
 :: 删除旧服务（如果存在）
 sc query %SERVICE_NAME% >nul 2>&1

@@ -1,7 +1,7 @@
-<Project Sdk="Microsoft.NET.Sdk.Worker"> 
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <OutputType>Exe</OutputType>
+    <OutputType>WinExe</OutputType> 
     <AssemblyName>ClashM.Elevated</AssemblyName>
     <TargetFramework>net10.0-windows10.0.26100.0</TargetFramework>
     <TargetPlatformMinVersion>10.0.17763.0</TargetPlatformMinVersion>
@@ -13,10 +13,6 @@
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <UseWindowsForms>false</UseWindowsForms>
   </PropertyGroup>
-
-  <ItemGroup>
-    <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" Version="9.0.0" /> 
-  </ItemGroup>
 
   <ItemGroup>
     <Manifest Include="$(ApplicationManifest)" />
