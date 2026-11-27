@@ -20,7 +20,7 @@ $manifest = Get-Content -LiteralPath $manifestSource -Raw
 
 if ([string]::IsNullOrWhiteSpace($Publisher)) {
   $m = [regex]::Match($manifest, '<Identity[^>]*Publisher="([^"]*)"')
-  if ($m.Success) { $Publisher = $m.Groups[1].Value } else { $Publisher = "CN=DSUK" }
+  if ($m.Success) { $Publisher = $m.Groups[1].Value } else { $Publisher = "CN=assassin321" }
 }
 
 $manifest = [regex]::Replace($manifest, '<Identity[^>]*/>',

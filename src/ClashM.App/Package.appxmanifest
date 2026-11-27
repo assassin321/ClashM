@@ -9,13 +9,13 @@
 
   <Identity
     Name="ClashM.App"
-    Publisher="CN=DSUK"
+    Publisher="CN=assassin321"
     Version="0.7.7.0"
     ProcessorArchitecture="x64" />
 
   <Properties>
     <DisplayName>ClashM</DisplayName>
-    <PublisherDisplayName>DSUK</PublisherDisplayName>
+    <PublisherDisplayName>assassin321</PublisherDisplayName>
     <Logo>Assets\Package\StoreLogo.png</Logo>
     <!-- 关闭注册表与 AppData 的写入虚拟化：系统代理写 HKCU\Internet Settings 必须对其它进程可见，
          内核对数据目录的读写也必须落到真实路径。关闭后需配套 unvirtualizedResources 能力。 -->

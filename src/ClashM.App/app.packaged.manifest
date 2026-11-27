@@ -7,7 +7,7 @@
        Package.appxmanifest 的 Identity 完全一致（publisher/packageName/applicationId）。
        非打包（unpackaged）运行时本元素被忽略。 -->
   <msix xmlns="urn:schemas-microsoft-com:msix.v1"
-        publisher="CN=DSUK"
+        publisher="CN=assassin321"
         packageName="ClashM.App"
         applicationId="ClashM"/>
 

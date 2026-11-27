@@ -7,9 +7,9 @@
     <AssemblyVersion>0.7.4.0</AssemblyVersion>
     <FileVersion>0.7.4.0</FileVersion>
     <Product>ClashM</Product>
-    <Authors>DSUK</Authors>
-    <Company>DSUK</Company>
-    <Copyright>Copyright © 2026 DSUK</Copyright>
+    <Authors>assassin321</Authors>
+    <Company>assassin321</Company>
+    <Copyright>Copyright © 2026 assassin321</Copyright>
     <RepositoryType>git</RepositoryType>
     <RepositoryUrl>https://github.com/assassin321/ClashM</RepositoryUrl>
   </PropertyGroup>

@@ -204,7 +204,7 @@ jobs:
             -p:Version=$ver `
             -o publish-msix
           $publisher = "${{ secrets.MSIX_PUBLISHER }}"
-          if ([string]::IsNullOrWhiteSpace($publisher)) { $publisher = 'CN=DSUK' }
+          if ([string]::IsNullOrWhiteSpace($publisher)) { $publisher = 'CN=assassin321' }
           $certPath = "${{ github.workspace }}\build\msix-signing.pfx"
           $hasCert = $false
           if ("${{ secrets.MSIX_CERT_PFX_BASE64 }}") {
