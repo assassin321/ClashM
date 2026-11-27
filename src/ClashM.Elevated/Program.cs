@@ -6,6 +6,7 @@ using System.Security.Principal;
 using System.Text;
 using System.Text.Json;
 using ClashM.Core.Services;
+using Microsoft.Extensions.Hosting;
 
 namespace ClashM.Elevated;
 
@@ -50,7 +51,7 @@ internal static class Program
                 .Build();
             
             await host.RunAsync();
-            return;
+            return 0;
         }
         
         if (!IsAdministrator())

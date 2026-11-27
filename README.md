@@ -78,7 +78,7 @@ ClashM 是一个原生 Windows 桌面应用，用 [mihomo](https://github.com/Me
 ## 运行要求
 
 - **Windows 10 1809（17763）及以上**，支持 x64 与 ARM64。
-- **管理员权限**：主程序以普通用户运行，内核作为子进程不能继承权限，TUN 不能直接生效。运行安装脚本install.bat以避免每次启动都要求管理员权限。
+- **管理员权限**：主程序当前以普通用户运行，内核作为子进程不能继承权限，需要以管理员权限运行主程序才能使 TUN 生效。运行安装脚本install.bat以避免每次启动都要求管理员权限。
 - **分离版额外要求**：需系统已安装 [.NET 10 桌面运行时](https://dotnet.microsoft.com/download/dotnet/10.0) 与 [Windows App Runtime 2.x](https://aka.ms/windowsappsdk/2.4/latest/windowsappruntimeinstall-x64.exe)。合并版无需这些。
 - TUN 依赖 **wintun**，会在需要时自动下载。
 - 默认混合端口 **7890**、控制端口 **9090**。若端口被 clash-party 等程序占用，请在设置中修改混合端口。
