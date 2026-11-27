@@ -1,0 +1,518 @@
+using System.Net.Http.Headers;
+using System.Text;
+using ClashM.Data;
+
+namespace ClashM.Core.Services;
+
+public sealed record ProfileItem(
+    long Id,
+    string Name,
+    string Kind,
+    string? Source,
+    string FilePath,
+    string? SubscriptionUserInfo,
+    bool IsActive,
+    long SortOrder,
+    string UpdatedAt)
+{
+    public string KindText => Kind switch
+    {
+        "url" => "订阅链接",
+        "file" => "本地文件",
+        "manual" => "手动配置",
+        _ => Kind,
+    };
+
+    public string UpdatedText
+    {
+        get
+        {
+            if (DateTimeOffset.TryParse(UpdatedAt, out var ts))
+                return ts.LocalDateTime.ToString("yyyy-MM-dd HH:mm");
+            return UpdatedAt;
+        }
+    }
+}
+
+public interface IProfileService
+{
+    string ProfilesDirectory { get; }
+    Task<IReadOnlyList<ProfileItem>> ListAsync(CancellationToken ct = default);
+    Task<ProfileItem?> GetActiveAsync(CancellationToken ct = default);
+    Task<ProfileItem> ImportFromUrlAsync(string url, string? name = null, CancellationToken ct = default);
+    Task<ProfileItem> ImportFromFileAsync(string sourcePath, string? name = null, CancellationToken ct = default);
+    Task<ProfileItem> CreateManualAsync(string name, string content, CancellationToken ct = default);
+    Task<bool> RefreshAsync(long id, CancellationToken ct = default);
+    Task<bool> SetActiveAsync(long id, CancellationToken ct = default);
+    Task RenameAsync(long id, string name, CancellationToken ct = default);
+    Task DeleteAsync(long id, CancellationToken ct = default);
+    Task<string?> ReadContentAsync(long id, CancellationToken ct = default);
+    Task<bool> SaveContentAsync(long id, string content, CancellationToken ct = default);
+    Task<string> GenerateRuntimeConfigAsync(long id, RuntimeYamlOptions options, CancellationToken ct = default);
+}
+
+public sealed class ProfileService : IProfileService
+{
+    private static readonly object ClientGate = new();
+    private static ClientSlot? _slot;
+
+    private static ClientSlot RentClient()
+    {
+        lock (ClientGate)
+        {
+            var useProxy = DownloadProxy.SubscriptionUseProxy;
+            if (_slot is null || _slot.UsesProxy != useProxy)
+            {
+                _slot?.Retire();
+                _slot = new ClientSlot(useProxy);
+            }
+            _slot.Enter();
+            return _slot;
+        }
+    }
+
+    private sealed class ClientSlot
+    {
+        private int _inUse;
+        private int _retired;
+        private int _disposed;
+
+        public ClientSlot(bool usesProxy)
+        {
+            UsesProxy = usesProxy;
+            Client = CreateClient(usesProxy);
+        }
+
+        public bool UsesProxy { get; }
+        public HttpClient Client { get; }
+
+        public void Enter() => Interlocked.Increment(ref _inUse);
+
+        public void Exit()
+        {
+            if (Interlocked.Decrement(ref _inUse) == 0 && Volatile.Read(ref _retired) == 1)
+                DisposeOnce();
+        }
+
+        public void Retire()
+        {
+            Interlocked.Exchange(ref _retired, 1);
+            if (Volatile.Read(ref _inUse) == 0)
+                DisposeOnce();
+        }
+
+        private void DisposeOnce()
+        {
+            if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+            try
+            {
+                Client.Dispose();
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    private readonly ProfileRepository _repo;
+    private readonly ISettingsService _settings;
+
+    public string ProfilesDirectory { get; }
+
+    public ProfileService(ClashMDatabase database, ISettingsService settings, string profilesDirectory)
+    {
+        _repo = new ProfileRepository(database);
+        _settings = settings;
+        ProfilesDirectory = profilesDirectory;
+        Directory.CreateDirectory(profilesDirectory);
+    }
+
+    private static HttpClient CreateClient(bool useProxy)
+    {
+        var client = new HttpClient(new HttpClientHandler
+        {
+            // 订阅是否经代理由设置项决定（默认经内核混合端口借力自身代理）。
+            // 用 CreateForSubscription 而不是 Create：后者会把系统代理也算进来，
+            // 而「订阅不走代理」的开关应当是完全直连。
+            Proxy = DownloadProxy.CreateForSubscription(),
+            UseProxy = useProxy,
+            AutomaticDecompression = System.Net.DecompressionMethods.All,
+        })
+        {
+            Timeout = Timeout.InfiniteTimeSpan,
+        };
+        client.DefaultRequestHeaders.Accept.ParseAdd("*/*");
+        return client;
+    }
+
+    private const string DefaultUserAgent = "clash-verge/v1.0.0 ClashM/0.1.0";
+    private const int DefaultTimeoutSeconds = 60;
+
+    /// <summary>读取订阅请求的 User-Agent 与超时，均可在设置里覆盖。</summary>
+    private async Task<(string UserAgent, TimeSpan Timeout)> ReadRequestOptionsAsync(CancellationToken ct)
+    {
+        var ua = await _settings.GetAsync("core.subscriptionUserAgent").ConfigureAwait(false);
+        if (string.IsNullOrWhiteSpace(ua)) ua = DefaultUserAgent;
+
+        var seconds = await _settings.GetIntAsync("core.subscriptionTimeout", DefaultTimeoutSeconds).ConfigureAwait(false);
+        if (seconds <= 0) seconds = DefaultTimeoutSeconds;
+
+        return (ua!, TimeSpan.FromSeconds(seconds));
+    }
+
+    /// <summary>带 User-Agent 与超时地下载订阅内容。</summary>
+    private async Task<string> FetchContentAsync(string url, CancellationToken ct)
+    {
+        var (ua, timeout) = await ReadRequestOptionsAsync(ct).ConfigureAwait(false);
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        linked.CancelAfter(timeout);
+
+        var slot = RentClient();
+        try
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Get, url);
+            try { request.Headers.UserAgent.ParseAdd(ua); }
+            catch (FormatException) { request.Headers.UserAgent.ParseAdd(DefaultUserAgent); }
+            using var response = await slot.Client.SendAsync(request, linked.Token).ConfigureAwait(false);
+            response.EnsureSuccessStatusCode();
+            return await response.Content.ReadAsStringAsync(linked.Token).ConfigureAwait(false);
+        }
+        finally
+        {
+            slot.Exit();
+        }
+    }
+
+    private static string SafeFileName(string name)
+    {
+        var invalid = Path.GetInvalidFileNameChars();
+        var sb = new StringBuilder(name.Length);
+        foreach (var c in name)
+            sb.Append(invalid.Contains(c) ? '_' : c);
+        var result = sb.ToString().Trim();
+        if (result.Length == 0) result = "profile";
+        // 名称可能来自外部(Profile-Title/文件名),过长会让整套路径超出 Windows 上限。
+        return result.Length > 60 ? result[..60] : result;
+    }
+
+    public async Task<IReadOnlyList<ProfileItem>> ListAsync(CancellationToken ct = default)
+    {
+        var records = await _repo.ListAsync().ConfigureAwait(false);
+        return records.Select(ToItem).ToList();
+    }
+
+    public async Task<ProfileItem?> GetActiveAsync(CancellationToken ct = default)
+    {
+        var record = await _repo.GetActiveAsync().ConfigureAwait(false);
+        return record is null ? null : ToItem(record);
+    }
+
+    private static ProfileItem ToItem(ProfileRecord r)
+        => new(r.Id, r.Name, r.Kind, r.Source, r.FilePath, r.SubscriptionUserInfo, r.IsActive, r.SortOrder, r.UpdatedAt);
+
+    public async Task<ProfileItem> ImportFromUrlAsync(string url, string? name = null, CancellationToken ct = default)
+    {
+        var meta = await FetchSubscriptionMetaAsync(url, ct).ConfigureAwait(false);
+        var displayName = string.IsNullOrWhiteSpace(name)
+            ? meta.Name ?? $"订阅 {DateTime.Now:MM-dd HH:mm}"
+            : name!.Trim();
+        var content = await FetchContentAsync(url, ct).ConfigureAwait(false);
+        if (!LooksLikeClashConfig(content))
+            throw new InvalidOperationException("下载内容不是有效的 Clash 配置（可能是错误页或需要代理访问）。");
+
+        if (!TryValidate(content, out var parseError))
+            throw new InvalidOperationException($"订阅内容无法解析:{parseError}");
+
+        var fileName = $"{SafeFileName(displayName)}-{DateTimeOffset.Now.ToUnixTimeMilliseconds()}.yaml";
+        var filePath = Path.Combine(ProfilesDirectory, fileName);
+        await File.WriteAllTextAsync(filePath, content, ct).ConfigureAwait(false);
+
+        var id = await _repo.InsertAsync(displayName, "url", url, filePath).ConfigureAwait(false);
+        if (!string.IsNullOrEmpty(meta.UserInfo))
+            await _repo.UpdateContentAsync(id, meta.UserInfo).ConfigureAwait(false);
+
+        var list = await ListAsync(ct).ConfigureAwait(false);
+        if (list.Count == 1)
+            await _repo.SetActiveAsync(id).ConfigureAwait(false);
+
+        return (await ListAsync(ct).ConfigureAwait(false)).First(p => p.Id == id);
+    }
+
+    private sealed record SubscriptionMeta(string? Name, string? UserInfo);
+
+    /// <summary>
+    /// 读取订阅响应头里的元信息：Profile-Title（base64，优先级最高）、
+    /// Content-Disposition 的文件名，以及 Subscription-Userinfo 用量。
+    /// </summary>
+    private async Task<SubscriptionMeta> FetchSubscriptionMetaAsync(string url, CancellationToken ct)
+    {
+        try
+        {
+            var (ua, timeout) = await ReadRequestOptionsAsync(ct).ConfigureAwait(false);
+            using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            linked.CancelAfter(timeout);
+
+            using var request = new HttpRequestMessage(HttpMethod.Get, url);
+            try { request.Headers.UserAgent.ParseAdd(ua); }
+            catch (FormatException) { request.Headers.UserAgent.ParseAdd(DefaultUserAgent); }
+            var slot = RentClient();
+            try
+            {
+                using var response = await slot.Client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, linked.Token).ConfigureAwait(false);
+
+                string? userInfo = null;
+                if (response.Headers.TryGetValues("subscription-userinfo", out var values))
+                    userInfo = string.Join("; ", values);
+
+                string? name = null;
+                if (response.Headers.TryGetValues("profile-title", out var titleValues))
+                {
+                    var raw = string.Join("", titleValues).Trim();
+                    name = DecodeProfileTitle(raw);
+                }
+
+                if (string.IsNullOrWhiteSpace(name)
+                    && response.Content.Headers.TryGetValues("Content-Disposition", out var cdValues))
+                {
+                    name = ParseFileName(string.Join(";", cdValues));
+                }
+
+                return new SubscriptionMeta(name, userInfo);
+            }
+            finally
+            {
+                slot.Exit();
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch
+        {
+            return new SubscriptionMeta(null, null);
+        }
+    }
+
+    private static string? DecodeProfileTitle(string raw)
+    {
+        if (raw.StartsWith("base64:", StringComparison.OrdinalIgnoreCase))
+        {
+            try
+            {
+                var bytes = Convert.FromBase64String(raw["base64:".Length..].Trim());
+                return System.Text.Encoding.UTF8.GetString(bytes).Trim();
+            }
+            catch
+            {
+                return null;
+            }
+        }
+        return string.IsNullOrWhiteSpace(raw) ? null : raw;
+    }
+
+    private static string? ParseFileName(string contentDisposition)
+    {
+        foreach (var part in contentDisposition.Split(';'))
+        {
+            var trimmed = part.Trim();
+            if (trimmed.StartsWith("filename*=", StringComparison.OrdinalIgnoreCase))
+            {
+                var value = trimmed["filename*=".Length..].Trim().Trim('"');
+                var idx = value.IndexOf("''", StringComparison.Ordinal);
+                if (idx >= 0) value = Uri.UnescapeDataString(value[(idx + 2)..]);
+                if (!string.IsNullOrWhiteSpace(value)) return value;
+            }
+            if (trimmed.StartsWith("filename=", StringComparison.OrdinalIgnoreCase))
+            {
+                var value = trimmed["filename=".Length..].Trim().Trim('"');
+                if (!string.IsNullOrWhiteSpace(value)) return value;
+            }
+        }
+        return null;
+    }
+
+    public async Task<ProfileItem> ImportFromFileAsync(string sourcePath, string? name = null, CancellationToken ct = default)
+    {
+        var displayName = string.IsNullOrWhiteSpace(name)
+            ? Path.GetFileNameWithoutExtension(sourcePath)
+            : name!.Trim();
+        var content = await File.ReadAllTextAsync(sourcePath, ct).ConfigureAwait(false);
+
+        if (!TryValidate(content, out var parseError))
+            throw new InvalidOperationException($"配置文件无法解析:{parseError}");
+
+        var fileName = $"{SafeFileName(displayName)}-{DateTimeOffset.Now.ToUnixTimeMilliseconds()}.yaml";
+        var filePath = Path.Combine(ProfilesDirectory, fileName);
+        await File.WriteAllTextAsync(filePath, content, ct).ConfigureAwait(false);
+
+        var id = await _repo.InsertAsync(displayName, "file", sourcePath, filePath).ConfigureAwait(false);
+        var list = await ListAsync(ct).ConfigureAwait(false);
+        if (list.Count == 1)
+            await _repo.SetActiveAsync(id).ConfigureAwait(false);
+
+        return (await ListAsync(ct).ConfigureAwait(false)).First(p => p.Id == id);
+    }
+
+    public async Task<ProfileItem> CreateManualAsync(string name, string content, CancellationToken ct = default)
+    {
+        var displayName = string.IsNullOrWhiteSpace(name) ? "手动配置" : name.Trim();
+        var fileName = $"{SafeFileName(displayName)}-{DateTimeOffset.Now.ToUnixTimeMilliseconds()}.yaml";
+        var filePath = Path.Combine(ProfilesDirectory, fileName);
+        await File.WriteAllTextAsync(filePath, content, ct).ConfigureAwait(false);
+
+        var id = await _repo.InsertAsync(displayName, "manual", null, filePath).ConfigureAwait(false);
+        var list = await ListAsync(ct).ConfigureAwait(false);
+        if (list.Count == 1)
+            await _repo.SetActiveAsync(id).ConfigureAwait(false);
+
+        return (await ListAsync(ct).ConfigureAwait(false)).First(p => p.Id == id);
+    }
+
+    public async Task<bool> RefreshAsync(long id, CancellationToken ct = default)
+    {
+        var item = (await ListAsync(ct).ConfigureAwait(false)).FirstOrDefault(p => p.Id == id);
+        if (item is null || item.Kind != "url" || string.IsNullOrEmpty(item.Source)) return false;
+
+        try
+        {
+            var meta = await FetchSubscriptionMetaAsync(item.Source, ct).ConfigureAwait(false);
+            var content = await FetchContentAsync(item.Source, ct).ConfigureAwait(false);
+            // 校验内容确为订阅配置：否则错误页/HTML 会覆盖掉可用配置。
+            if (!LooksLikeClashConfig(content)) return false;
+            if (!TryValidate(content, out _)) return false;
+            await File.WriteAllTextAsync(item.FilePath, content, ct).ConfigureAwait(false);
+            await _repo.UpdateContentAsync(id, meta.UserInfo).ConfigureAwait(false);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            // 失败时返回 false 让调用方提示「刷新失败」，但网络上/解析上的具体原因要留下来，
+            // 否则只会看到「更新了但没变化」，无从判断是订阅源挂了还是配置内容不合法。
+            Log($"[ProfileService] 刷新订阅「{item.Name}」失败：{ex.Message}");
+            return false;
+        }
+    }
+
+    private static void Log(string message)
+    {
+        try
+        {
+            var path = Path.Combine(ClashMAppData.ResolveDirectory(), "core.log");
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            File.AppendAllText(path, $"[{DateTime.Now:O}] {message}{Environment.NewLine}");
+        }
+        catch
+        {
+        }
+    }
+
+    /// <summary>
+    /// 粗判内容是否为 Clash/mihomo 配置：必须含 proxies / proxy-providers / proxy-groups
+    /// 之一，且不是 HTML。用于防止把错误页写进订阅文件。
+    /// </summary>
+    private static bool LooksLikeClashConfig(string content)
+    {
+        if (string.IsNullOrWhiteSpace(content)) return false;
+        var trimmed = content.TrimStart();
+        if (trimmed.StartsWith('<')) return false;
+        return content.Contains("proxies:", StringComparison.Ordinal)
+            || content.Contains("proxy-providers:", StringComparison.Ordinal)
+            || content.Contains("proxy-groups:", StringComparison.Ordinal);
+    }
+
+    public async Task<bool> SetActiveAsync(long id, CancellationToken ct = default)
+    {
+        await _repo.SetActiveAsync(id).ConfigureAwait(false);
+        return true;
+    }
+
+    public Task RenameAsync(long id, string name, CancellationToken ct = default)
+        => _repo.RenameAsync(id, name);
+
+    public async Task DeleteAsync(long id, CancellationToken ct = default)
+    {
+        var item = (await ListAsync(ct).ConfigureAwait(false)).FirstOrDefault(p => p.Id == id);
+        if (item is null) return;
+
+        await _repo.DeleteAsync(id).ConfigureAwait(false);
+        try
+        {
+            if (File.Exists(item.FilePath)) File.Delete(item.FilePath);
+        }
+        catch
+        {
+        }
+
+        var remaining = await ListAsync(ct).ConfigureAwait(false);
+        if (remaining.Count > 0 && !remaining.Any(p => p.IsActive))
+            await _repo.SetActiveAsync(remaining[0].Id).ConfigureAwait(false);
+    }
+
+    public async Task<string?> ReadContentAsync(long id, CancellationToken ct = default)
+    {
+        var item = (await ListAsync(ct).ConfigureAwait(false)).FirstOrDefault(p => p.Id == id);
+        if (item is null || !File.Exists(item.FilePath)) return null;
+        return await File.ReadAllTextAsync(item.FilePath, ct).ConfigureAwait(false);
+    }
+
+    public async Task<bool> SaveContentAsync(long id, string content, CancellationToken ct = default)
+    {
+        var item = (await ListAsync(ct).ConfigureAwait(false)).FirstOrDefault(p => p.Id == id);
+        if (item is null) return false;
+
+        // 保存前先确认这份内容能被 YAML 解析成 mapping。
+        //
+        // 订阅文件是后面 GenerateRuntimeYamlAsync / 覆写预览的共同输入，
+        // 一旦存进非法 YAML，之后任何一次「应用配置」都会抛异常；而部分调用方
+        // （覆写页的标签切换、设置页的导航回调）是 async void，异常会直接掀掉进程。
+        // 在这里拦住，失败原因直接回给编辑器。
+        if (!TryValidate(content, out var error)) throw new InvalidOperationException(error);
+
+        try
+        {
+            await File.WriteAllTextAsync(item.FilePath, content, ct).ConfigureAwait(false);
+            await _repo.UpdateContentAsync(id).ConfigureAwait(false);
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>校验订阅内容是可解析的 YAML 映射。空内容视为合法（等同 fallback 配置）。</summary>
+    private static bool TryValidate(string content, out string error)
+    {
+        error = "";
+        if (string.IsNullOrWhiteSpace(content)) return true;
+
+        try
+        {
+            var stream = new YamlDotNet.RepresentationModel.YamlStream();
+            using var reader = new StringReader(content);
+            stream.Load(reader);
+            if (stream.Documents.Count == 0) return true;
+            if (stream.Documents[0].RootNode is not YamlDotNet.RepresentationModel.YamlMappingNode)
+            {
+                error = "顶层必须是键值映射（mapping），不能是列表或标量";
+                return false;
+            }
+            return true;
+        }
+        catch (Exception ex)
+        {
+            error = $"YAML 语法错误：{ex.Message}";
+            return false;
+        }
+    }
+
+    public async Task<string> GenerateRuntimeConfigAsync(long id, RuntimeYamlOptions options, CancellationToken ct = default)
+    {
+        var content = await ReadContentAsync(id, ct).ConfigureAwait(false);
+        if (string.IsNullOrWhiteSpace(content))
+            return MihomoConfigBuilder.BuildFallbackYaml(options);
+
+        return MihomoConfigBuilder.BuildRuntimeYaml(content, options);
+    }
+}
