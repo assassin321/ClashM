@@ -37,22 +37,22 @@ internal static class Program
             try { Console.Error.WriteLine($"[ClashM.Elevated] 写日志失败:{ex.Message}"); } catch { }
         }
     }
-
-    if (args.Length > 0 && args[0] == "--service")
-    {
-        using var host = Host.CreateDefaultBuilder(args)
-            .UseWindowsService(options =>
-            {
-                options.ServiceName = "ClashM Elevated Service";
-            })
-            .Build();
-        
-        await host.RunAsync();
-        return;
-    }
     
     private static async Task<int> Main(string[] args)
     {
+        if (args.Length > 0 && args[0] == "--service")
+        {
+            using var host = Host.CreateDefaultBuilder(args)
+                .UseWindowsService(options =>
+                {
+                    options.ServiceName = "ClashM Elevated Service";
+                })
+                .Build();
+            
+            await host.RunAsync();
+            return;
+        }
+        
         if (!IsAdministrator())
         {
             Console.Error.WriteLine("ClashM.Elevated 需要管理员权限。");

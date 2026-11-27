@@ -109,6 +109,7 @@ public sealed partial class SettingsPage : Page, IPageLifecycle
             {
                 "gvisor" => 1,
                 "system" => 2,
+                "mips" => 3,
                 _ => 0,
             };
             var proxyIndex = ViewModel.GithubProxyIndex;
@@ -170,6 +171,7 @@ public sealed partial class SettingsPage : Page, IPageLifecycle
         {
             1 => "gvisor",
             2 => "system",
+            3 => "mips",
             _ => "mixed",
         };
     }

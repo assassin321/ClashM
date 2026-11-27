@@ -314,6 +314,7 @@
                             <ComboBoxItem Content="mixed" />
                             <ComboBoxItem Content="gvisor" />
                             <ComboBoxItem Content="system" />
+                            <ComboBoxItem Content="mips" />
                         </ComboBox>
                     </controls:SettingsCard>
 
