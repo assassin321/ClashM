@@ -117,8 +117,10 @@ jobs:
             -p:Version=${{ steps.ver.outputs.version }} `
             -o publish
           
-          # 把服务包装器复制到 publish 目录
-          Copy-Item "service-wrapper-temp/*" "publish/" -Recurse -Force
+          # 如果服务包装器编译成功，则复制到 publish 目录
+          if (Test-Path "service-wrapper-temp") {
+            Copy-Item "service-wrapper-temp/*" "publish/" -Recurse -Force
+          }
 
       - name: Fetch bundled kernel & geodata
         if: contains(matrix.variant, 'full')
